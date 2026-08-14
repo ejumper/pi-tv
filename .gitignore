@@ -1,0 +1,7 @@
+# ydotool build artifacts (regenerated with cmake/make)
+tools/ydotool/build/
+
+# backup files
+*.bak-*
+*.save
+.DS_Store

@@ -1,0 +1,6 @@
+[Unit]
+Description=Disable screen dim overlay
+
+[Service]
+Type=oneshot
+ExecStart=/home/tv/pi-tv/tools/screen-dim-toggle.sh --off

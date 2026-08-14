@@ -1,0 +1,22 @@
+[Unit]
+Description=Jellyfin Screensaver Daemon
+Documentation=https://github.com/user/jellyfin-saver
+After=graphical-session.target
+Requires=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/tv/.local/share/jellyfin-saver/jellyfin_saver.py start
+Restart=on-failure
+RestartSec=10
+
+# Environment for Wayland/GTK
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# Resource limits
+MemoryMax=512M
+
+[Install]
+WantedBy=graphical-session.target

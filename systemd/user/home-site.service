@@ -1,0 +1,13 @@
+[Unit]
+Description=Home Site Web Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tv/home-site
+ExecStart=/home/tv/home-site/halfahomepage
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

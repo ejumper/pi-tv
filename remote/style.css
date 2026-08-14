@@ -1,0 +1,424 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body {
+    background: #555;
+    min-height: 100dvh;
+    display: flex;
+    justify-content: center;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #fff;
+}
+
+/* ─────────────────────────────────────────────
+   Main container
+   Full viewport height, max 900px wide.
+   Nav (1fr) absorbs whatever the four fixed
+   rows + gaps don't consume, so the grid always
+   totals exactly 100dvh.
+───────────────────────────────────────────── */
+.main-cont {
+    width: 100%;
+    max-width: 900px;
+    height: 100dvh;
+    display: grid;
+    grid-template-rows: 14dvh 10dvh 1fr 10dvh 15dvh;
+    grid-template-columns: 100%;
+    row-gap: 8px;
+}
+
+/* ─────────────────────────────────────────────
+   Power container  (14dvh)
+   Power button centred vertically, left-aligned.
+   Divider line sits at the bottom of the cell.
+───────────────────────────────────────────── */
+.power-cont {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.mode-btns {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.mode-btn {
+    width: var(--icon-size);
+    height: var(--icon-size);
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    color: #fff;
+    font-size: calc(var(--icon-size) * 0.32);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s;
+}
+
+.mode-btn:active {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+/* ─────────────────────────────────────────────
+   Nav container  (1fr ≈ 61dvh – gaps)
+   D-pad centred, with side margins that grow
+   proportionally as the viewport widens so the
+   control doesn't sprawl on tall/thin screens.
+
+   --sp  : side padding, clamps from 16 px →
+           5 vw → 80 px as the viewport widens.
+   --dpad-size : largest square that fits the
+           nav height (50dvh cap) and the
+           padded width simultaneously.
+───────────────────────────────────────────── */
+:root {
+    --sp: clamp(50px, 14vw, 140px);
+    --icon-size: min(8dvh, 56px);
+    --dpad-size: min(50dvh, calc(100vw - 2 * var(--sp)), 800px);
+
+    --d-side:   calc(var(--dpad-size) *  72 / 264);
+    --d-center: calc(var(--dpad-size) * 120 / 264);
+    --d-arrow:  calc(var(--dpad-size) * 165 / 264);
+    --d-enter:  calc(var(--dpad-size) * 128 / 264);
+}
+
+.nav-cont {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-inline: var(--sp);
+}
+
+/* ─────────────────────────────────────────────
+   D-Pad
+   Grid proportions (base units out of 264):
+     side   =  72  (rendered arrow height)
+     center = 120  (grid anchor; arrow overflows)
+     arrow  = 165  (wider than center → hugs in)
+     enter  = 128  (slightly wider than center)
+───────────────────────────────────────────── */
+.dpad {
+    display: grid;
+    grid-template-columns: var(--d-side) var(--d-center) var(--d-side);
+    grid-template-rows:    var(--d-side) var(--d-center) var(--d-side);
+    width:  var(--dpad-size);
+    height: var(--dpad-size);
+}
+
+.arrow-up    { grid-column: 2; grid-row: 1; }
+.arrow-left  { grid-column: 1; grid-row: 2; }
+.enter-btn   { grid-column: 2; grid-row: 2; z-index: 1; }
+.arrow-right { grid-column: 3; grid-row: 2; }
+.arrow-down  { grid-column: 2; grid-row: 3; }
+
+.arrow-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.arrow-btn:active { opacity: 0.6; }
+
+/* ─────────────────────────────────────────────
+   Button press animation
+   Snaps to depressed, holds briefly, springs back.
+───────────────────────────────────────────── */
+@keyframes btn-press {
+    0%   { transform: scale(1);    }
+    16%  { transform: scale(0.88); }
+    55%  { transform: scale(0.88); }
+    100% { transform: scale(1);    }
+}
+
+.pressing {
+    animation: btn-press 0.38s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+
+.arrow-btn img {
+    width: var(--d-arrow);
+    height: auto;
+    pointer-events: none;
+    display: block;
+    flex-shrink: 0;
+}
+
+.arrow-left img  { transform: rotate(-90deg); }
+.arrow-right img { transform: rotate(90deg);  }
+.arrow-down img  { transform: rotate(180deg); }
+
+.enter-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.enter-btn:active { opacity: 0.6; }
+
+.enter-btn img {
+    width: var(--d-enter);
+    height: var(--d-enter);
+    object-fit: contain;
+    pointer-events: none;
+    display: block;
+}
+
+/* ─────────────────────────────────────────────
+   Icon buttons  (power-cont, util-cont)
+───────────────────────────────────────────── */
+.icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 12px;
+    transition: background 0.1s;
+}
+
+.icon-btn:active { background: rgba(0, 0, 0, 0.2); }
+
+.icon-btn img {
+    object-fit: contain;
+    pointer-events: none;
+    display: block;
+}
+
+.power-btn img {
+    width:  var(--icon-size);
+    height: var(--icon-size);
+}
+
+/* ─────────────────────────────────────────────
+   Util container  (10dvh)
+   Tab / Menu / Escape with equal spacing.
+   Icons scale down to fit the compact row.
+───────────────────────────────────────────── */
+.util-cont {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+}
+
+.util-cont .icon-btn img {
+    width:  var(--icon-size);
+    height: var(--icon-size);
+}
+
+.util-cont .icon-btn span {
+    display: none;
+}
+
+/* ─────────────────────────────────────────────
+   Vol container  (10dvh, under power separator)
+   VOL− / VOL+ with equal spacing, vertically centred.
+───────────────────────────────────────────── */
+.vol-cont {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+}
+
+.vol-btn {
+    width: 40%;
+    height: min(9dvh, 54px);
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    cursor: pointer;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-family: system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.06em;
+    transition: background 0.1s, border-color 0.1s;
+}
+
+.vol-btn:active {
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* ─────────────────────────────────────────────
+   Skip container  (15dvh)
+   Skip-back / Skip-fwd at bottom, top-aligned.
+───────────────────────────────────────────── */
+.skip-cont {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-evenly;
+    padding-top: 12px;
+}
+
+.skip-btn {
+    width: 40%;
+    height: min(9dvh, 54px);
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    cursor: pointer;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-family: system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.06em;
+    transition: background 0.1s, border-color 0.1s;
+}
+
+.skip-btn:active {
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* ─────────────────────────────────────────────
+   Overlays  (trackpad + keyboard)
+───────────────────────────────────────────── */
+.overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: #111;
+    display: flex;
+    flex-direction: column;
+}
+
+.overlay[hidden] { display: none; }
+
+.overlay-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    flex-shrink: 0;
+}
+
+.overlay-title {
+    font-size: 0.8rem;
+    color: #888;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.overlay-close {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 1.3rem;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 8px;
+    line-height: 1;
+    transition: background 0.1s;
+}
+
+.overlay-close:active { background: rgba(255, 255, 255, 0.12); }
+
+/* Trackpad */
+.trackpad-area {
+    flex: 1;
+    touch-action: none;
+    cursor: crosshair;
+    background: #000;
+}
+
+.overlay-btns {
+    display: flex;
+    gap: 16px;
+    padding: 12px 20px;
+    flex-shrink: 0;
+    height: 15dvh;
+    align-items: center;
+}
+
+.click-btn {
+    flex: 1;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    border-radius: 12px;
+    font-size: 0.9rem;
+    font-family: system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.click-btn:active { background: rgba(255, 255, 255, 0.18); }
+
+/* Keyboard */
+.keyboard-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 36px 24px 24px;
+    gap: 18px;
+}
+
+.keyboard-area input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 1.1rem;
+    padding: 14px 16px;
+    font-family: system-ui, -apple-system, sans-serif;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.keyboard-area input:focus { border-color: rgba(255, 255, 255, 0.5); }
+
+.keyboard-area input::placeholder { color: #555; }
+
+.input-error {
+    border-color: #e05555 !important;
+    animation: input-shake 0.3s;
+}
+
+@keyframes input-shake {
+    0%, 100% { transform: translateX(0); }
+    25%      { transform: translateX(-6px); }
+    75%      { transform: translateX(6px); }
+}
+
+.send-btn {
+    width: 100%;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 1rem;
+    font-family: system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.send-btn:active { background: rgba(255, 255, 255, 0.2); }

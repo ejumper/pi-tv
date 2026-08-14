@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Remote</title>
+    <meta name="theme-color" content="#555555">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="stylesheet" href="style.css?v=3">
+    <script defer src="remote.js?v=3"></script>
+    <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
+</head>
+<body>
+
+    <!-- ── Main remote ─────────────────────────────────────────── -->
+    <div class="main-cont">
+
+        <div class="power-cont">
+            <button class="icon-btn power-btn" id="btn-power" aria-label="Power">
+                <img src="icons/power.svg" alt="Power">
+            </button>
+            <div class="mode-btns">
+                <button class="mode-btn" id="btn-alarm-mode" aria-label="Alarm Clock">AC</button>
+                <button class="mode-btn" id="btn-keyboard-mode" aria-label="Keyboard">KB</button>
+                <button class="mode-btn" id="btn-trackpad-mode" aria-label="Trackpad">TP</button>
+            </div>
+        </div>
+
+        <div class="vol-cont">
+            <button class="vol-btn" id="btn-vol-down" aria-label="Volume Down">VOL −</button>
+            <button class="vol-btn" id="btn-vol-up"   aria-label="Volume Up">VOL +</button>
+        </div>
+
+        <div class="nav-cont">
+            <div class="dpad">
+                <button class="arrow-btn arrow-up"    id="btn-up"    aria-label="Up">
+                    <img src="icons/arrows.svg" alt="">
+                </button>
+                <button class="arrow-btn arrow-left"  id="btn-left"  aria-label="Left">
+                    <img src="icons/arrows.svg" alt="">
+                </button>
+                <button class="enter-btn"             id="btn-enter" aria-label="Enter">
+                    <img src="icons/enter.svg" alt="Enter">
+                </button>
+                <button class="arrow-btn arrow-right" id="btn-right" aria-label="Right">
+                    <img src="icons/arrows.svg" alt="">
+                </button>
+                <button class="arrow-btn arrow-down"  id="btn-down"  aria-label="Down">
+                    <img src="icons/arrows.svg" alt="">
+                </button>
+            </div>
+        </div>
+
+        <div class="util-cont">
+            <button class="icon-btn" id="btn-home" aria-label="Home">
+                <img src="icons/home.svg" alt="Home">
+                <span>Home</span>
+            </button>
+            <button class="icon-btn" id="btn-escape" aria-label="Escape">
+                <img src="icons/escape.svg" alt="Escape">
+                <span>Esc</span>
+            </button>
+            <button class="icon-btn" id="btn-tab" aria-label="Tab">
+                <img src="icons/tab.svg" alt="Tab">
+                <span>Tab</span>
+            </button>
+            <button class="icon-btn" id="btn-menu" aria-label="Menu">
+                <img src="icons/menu.svg" alt="Menu">
+                <span>Menu</span>
+            </button>
+        </div>
+
+        <div class="skip-cont">
+            <button class="skip-btn" id="btn-skip-back" aria-label="Skip Back">◀◀ Back</button>
+            <button class="skip-btn" id="btn-skip-fwd"  aria-label="Skip Forward">Forw ▶▶</button>
+        </div>
+
+    </div>
+
+    <!-- ── Trackpad overlay ────────────────────────────────────── -->
+    <div id="overlay-trackpad" class="overlay" hidden>
+        <div class="overlay-bar">
+            <span class="overlay-title">Trackpad</span>
+            <button class="overlay-close" id="close-trackpad" aria-label="Close">✕</button>
+        </div>
+        <div id="trackpad-area" class="trackpad-area"></div>
+        <div class="overlay-btns">
+            <button class="click-btn" id="btn-mouse-left">Left Click</button>
+            <button class="click-btn" id="btn-mouse-right">Right Click</button>
+        </div>
+    </div>
+
+    <!-- ── Keyboard overlay ────────────────────────────────────── -->
+    <div id="overlay-keyboard" class="overlay" hidden>
+        <div class="overlay-bar">
+            <span class="overlay-title">Type</span>
+            <button class="overlay-close" id="close-keyboard" aria-label="Close">✕</button>
+        </div>
+        <div class="keyboard-area">
+            <input id="type-input" type="text"
+                placeholder="Type here…"
+                autocomplete="off" autocorrect="off"
+                autocapitalize="off" spellcheck="false">
+            <button id="type-send" class="send-btn">Send</button>
+        </div>
+    </div>
+
+    <!-- ── Alarm overlay ────────────────────────────────────────── -->
+    <div id="overlay-alarm" class="overlay" hidden>
+        <div class="overlay-bar">
+            <span class="overlay-title">Alarm</span>
+            <button class="overlay-close" id="close-alarm" aria-label="Close">✕</button>
+        </div>
+        <div class="keyboard-area">
+            <input id="alarm-input" type="text"
+                inputmode="numeric" pattern="[0-9]*"
+                maxlength="4"
+                autocomplete="off" autocorrect="off"
+                autocapitalize="off" spellcheck="false">
+            <button id="alarm-send" class="send-btn">Send</button>
+        </div>
+    </div>
+
+</body>
+</html>

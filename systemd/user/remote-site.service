@@ -1,0 +1,13 @@
+[Unit]
+Description=TV Remote Web Interface
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tv/pi-tv/remote
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

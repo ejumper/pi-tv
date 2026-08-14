@@ -1,0 +1,11 @@
+[Unit]
+Description=ydotoold input injection daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/home/tv/pi-tv/tools/ydotool/build/ydotoold --socket-path=/tmp/ydotoold.socket --socket-own=1000:1000 --socket-perm=0660
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
