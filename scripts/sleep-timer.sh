@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPTS_DIR="${HOME}/scripts"
+SCRIPTS_DIR="${HOME}/pi-tv/scripts"
 SLEEP_UNIT="tv-sleep-timer"
 
 FUZZEL_OPTS=(
