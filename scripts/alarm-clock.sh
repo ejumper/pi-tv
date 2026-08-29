@@ -6,7 +6,7 @@ ALARM_DIR="${HOME}/.config/alarm-clock"
 ALARM_TIME_FILE="${ALARM_DIR}/time"
 ALARM_UNIT="alarm-clock"
 CEC_DEV="/dev/cec1"
-ALARM_SOUND="${HOME}/tools/alarm.m4a"
+ALARM_SOUND="${HOME}/pi-tv/tools/alarm.m4a"
 FEED_URL="https://www.democracynow.org/podcast-video.xml"
 INVIDIOUS_BASE_URL="https://tube.halfab.net"
 ALTFEED1_PLAYLIST_ID="PL39u5ZEfYDEO5PaNRWyqloGY6zzJ1fjBa"
@@ -15,7 +15,7 @@ ALTFEED_MIN_LENGTH_SECONDS=2500
 CACHE_DIR="${HOME}/.cache/alarm-clock"
 PLAYER_HTML="${CACHE_DIR}/player.html"
 WEATHER_CACHE_FILE="${CACHE_DIR}/weather"
-YDOTOOL_BIN="${HOME}/tools/ydotool/build/ydotool"
+YDOTOOL_BIN="${HOME}/pi-tv/tools/ydotool/build/ydotool"
 YDOTOOL_SOCKET_PATH="/tmp/ydotoold.socket"
 WEATHER_URL="https://wttr.in/76248?format=%t+%C&u"
 ALARM_VIDEO_DELAY_SECONDS=21
@@ -475,10 +475,10 @@ prepare_latest_video() {
     cp -f "$ALARM_SOUND" "$CACHE_DIR/alarm.m4a"
   fi
   local tts_files=()
-  if [ -d "${HOME}/tools/tts" ]; then
-    mapfile -t tts_files < <(find "${HOME}/tools/tts" -maxdepth 1 -type f -printf "%f\n" | sort -V)
+  if [ -d "${HOME}/pi-tv/tools/tts" ]; then
+    mapfile -t tts_files < <(find "${HOME}/pi-tv/tools/tts" -maxdepth 1 -type f -printf "%f\n" | sort -V)
     for tts_file in "${tts_files[@]}"; do
-      cp -f "${HOME}/tools/tts/${tts_file}" "${CACHE_DIR}/${tts_file}"
+      cp -f "${HOME}/pi-tv/tools/tts/${tts_file}" "${CACHE_DIR}/${tts_file}"
     done
   fi
   local tts_js="[]"
