@@ -685,8 +685,12 @@ const intervalNameEl = document.getElementById('interval-name');
 const intervalTimeEl = document.getElementById('interval-time');
 const mediaUrl = $media_url_js;
 const embedId = $embed_id_js;
+// No autoplay param on purpose: Brave does not honour allow="autoplay"
+// delegation from a file:// parent (user activation does not propagate into
+// cross-origin iframes), so the embed always loads paused with its play button
+// up, and the scripted second click starts it with a real in-frame gesture.
 const embedPlayerUrl = embedId
-  ? '${INVIDIOUS_BASE_URL}/embed/' + encodeURIComponent(embedId) + '?autoplay=1&muted=0'
+  ? '${INVIDIOUS_BASE_URL}/embed/' + encodeURIComponent(embedId)
   : '';
 const isAudio = $is_audio;
 const thumbnail = $thumbnail_js;
@@ -1137,14 +1141,23 @@ start_video_playback() {
     return 0
   fi
 
-  # In embed mode this click no longer starts the video (the embed autoplays);
-  # it supplies the user activation the parent document needs to play the TTS
-  # interval announcements. It lands on the parent overlay, never the embed.
+  # Click 1 lands on the page overlay: it gives the parent document the user
+  # activation the TTS element needs (Brave does not propagate activation into
+  # the cross-origin embed), and the overlay removes itself afterwards.
+  # Click 2 lands on the embed's big play button — Invidious' player style puts
+  # it at the top-left (55,34) at 1080p, verified via CDP — and starts playback
+  # with a real in-frame gesture. The embed is deliberately loaded WITHOUT
+  # autoplay: Brave ignores allow="autoplay" delegation from a file:// parent,
+  # so the button press is the only reliable start. The gap between clicks lets
+  # the wakeup voice finish first.
   (
     export YDOTOOL_SOCKET="$YDOTOOL_SOCKET_PATH"
     sleep "$ALARM_VIDEO_DELAY_SECONDS"
     sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
     "$YDOTOOL_BIN" mousemove --absolute 517 312
+    "$YDOTOOL_BIN" click 0xC0
+    sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
+    "$YDOTOOL_BIN" mousemove --absolute 55 34
     "$YDOTOOL_BIN" click 0xC0
   ) &
 }
