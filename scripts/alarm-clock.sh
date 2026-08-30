@@ -12,6 +12,7 @@ INVIDIOUS_BASE_URL="https://tube.halfab.net"
 ALTFEED1_PLAYLIST_ID="PL39u5ZEfYDEO5PaNRWyqloGY6zzJ1fjBa"
 ALTFEED2_PLAYLIST_ID="PLT5G3DTYh5urqnH5XWfqc_dTJnaddX9jm"
 ALTFEED_MIN_LENGTH_SECONDS=2500
+ALTFEED_MAX_CANDIDATES=5
 CACHE_DIR="${HOME}/.cache/alarm-clock"
 PLAYER_HTML="${CACHE_DIR}/player.html"
 WEATHER_CACHE_FILE="${CACHE_DIR}/weather"
@@ -26,6 +27,7 @@ WIFI_FALLBACK_SSID="mesh-node"
 WIFI_RECONNECT_TIMEOUT_SECONDS=45
 WIFI_RECONNECT_POLL_SECONDS=2
 VIDEO_READY=0
+EMBED_MODE=0
 
 FUZZEL_BASE_OPTS=(
   --dmenu
@@ -135,6 +137,8 @@ start_alarm_sound() {
   if [ -f "$ALARM_SOUND" ]; then
     ffplay -nodisp -autoexit -hide_banner -loglevel error "$ALARM_SOUND" >/dev/null 2>&1 &
     echo "$!"
+  else
+    echo "alarm sound missing at ${ALARM_SOUND}; there will be no audio alarm" >&2
   fi
 }
 
@@ -310,23 +314,35 @@ for item in root.findall(".//item"):
 PY
 }
 
+# Resolves a playlist video to an Invidious video id and hands the id to the
+# player page, which embeds Invidious' own watch page. The embed resolves its own
+# streams, so this no longer depends on formatStreams/adaptiveFormats — YouTube
+# removed formatStreams entirely on 2026-08-30, which had silently killed the
+# old stream-extraction approach. Candidate scanning is capped so a broken or
+# slow instance can't stall the alarm, and every failure reports on stderr.
 fetch_media_from_invidious_playlist() {
   local playlist_id="${1:-}"
   local min_length_seconds="${2:-0}"
-  python3 - "$INVIDIOUS_BASE_URL" "$playlist_id" "$min_length_seconds" <<'PY'
+  python3 - "$INVIDIOUS_BASE_URL" "$playlist_id" "$min_length_seconds" "$ALTFEED_MAX_CANDIDATES" <<'PY'
 import json
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
 base_url = sys.argv[1].rstrip("/")
 playlist_id = sys.argv[2]
 min_length_seconds = int(sys.argv[3])
+max_candidates = int(sys.argv[4])
 
 if not base_url or not playlist_id:
+    print("invidious: missing base url or playlist id", file=sys.stderr)
     sys.exit(1)
 
 headers = {"User-Agent": "alarm-clock"}
+
+def log(message):
+    print(f"invidious[{playlist_id[:10]}]: {message}", file=sys.stderr)
 
 def fetch_json(url):
     req = urllib.request.Request(url, headers=headers)
@@ -342,17 +358,17 @@ def best_thumbnail(video):
         key=lambda t: int(t.get("width") or 0) * int(t.get("height") or 0),
     ).get("url", "")
 
-def stream_score(stream):
-    label = stream.get("qualityLabel") or stream.get("quality") or ""
-    digits = "".join(ch for ch in label if ch.isdigit())
-    height = int(digits) if digits else 0
-    container_bonus = 10000 if stream.get("container") == "mp4" else 0
-    return container_bonus + height
-
 playlist_url = f"{base_url}/api/v1/playlists/{urllib.parse.quote(playlist_id, safe='')}"
-playlist = fetch_json(playlist_url)
+try:
+    playlist = fetch_json(playlist_url)
+except (urllib.error.URLError, TimeoutError, ValueError, OSError) as err:
+    log(f"playlist fetch FAILED: {err}")
+    sys.exit(1)
 
-for video in playlist.get("videos") or []:
+videos = playlist.get("videos") or []
+long_enough = 0
+
+for video in videos:
     try:
         length_seconds = int(video.get("lengthSeconds") or 0)
     except (TypeError, ValueError):
@@ -364,27 +380,33 @@ for video in playlist.get("videos") or []:
     if not video_id:
         continue
 
+    long_enough += 1
+    if long_enough > max_candidates:
+        log(f"gave up after {max_candidates} candidates ({len(videos)} videos in playlist)")
+        break
+
     video_url = f"{base_url}/api/v1/videos/{urllib.parse.quote(video_id, safe='')}"
-    details = fetch_json(video_url)
+    try:
+        details = fetch_json(video_url)
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as err:
+        log(f"detail fetch failed for {video_id}, skipping: {err}")
+        continue
+
     if details.get("liveNow") or details.get("isUpcoming"):
+        log(f"skipping {video_id}: live or upcoming")
         continue
 
-    streams = [
-        stream for stream in (details.get("formatStreams") or [])
-        if stream.get("url")
-    ]
-    if not streams:
-        continue
-
-    stream = max(streams, key=stream_score)
     thumbnail = best_thumbnail(details) or best_thumbnail(video)
+    log(f"selected {video_id}")
     print(json.dumps({
-        "url": stream["url"],
+        "url": "",
+        "embed_id": video_id,
         "is_audio": False,
         "thumbnail": thumbnail,
     }))
     break
 else:
+    log(f"no usable video: {len(videos)} videos, {long_enough} over {min_length_seconds}s")
     sys.exit(1)
 PY
 }
@@ -441,33 +463,48 @@ PY
 
 prepare_latest_video() {
   local media_url media_json feed_to_use is_audio thumbnail media_url_js thumbnail_js weather_url_js
-  local day_of_week
+  local embed_id embed_id_js feed_label day_of_week
   VIDEO_READY=0
 
   day_of_week=$(date +%u)
 
   if [ "$day_of_week" -eq 6 ] && [ -n "$ALTFEED1_PLAYLIST_ID" ]; then
-    media_json=$(fetch_media_from_invidious_playlist "$ALTFEED1_PLAYLIST_ID" "$ALTFEED_MIN_LENGTH_SECONDS" 2>/dev/null || true)
+    feed_label="altfeed1 (${ALTFEED1_PLAYLIST_ID:0:12})"
+    media_json=$(fetch_media_from_invidious_playlist "$ALTFEED1_PLAYLIST_ID" "$ALTFEED_MIN_LENGTH_SECONDS" || true)
   elif [ "$day_of_week" -eq 7 ] && [ -n "$ALTFEED2_PLAYLIST_ID" ]; then
-    media_json=$(fetch_media_from_invidious_playlist "$ALTFEED2_PLAYLIST_ID" "$ALTFEED_MIN_LENGTH_SECONDS" 2>/dev/null || true)
+    feed_label="altfeed2 (${ALTFEED2_PLAYLIST_ID:0:12})"
+    media_json=$(fetch_media_from_invidious_playlist "$ALTFEED2_PLAYLIST_ID" "$ALTFEED_MIN_LENGTH_SECONDS" || true)
   else
     feed_to_use="$FEED_URL"
-    media_json=$(fetch_media_from_rss "$feed_to_use" 2>/dev/null || true)
+    feed_label="rss ($FEED_URL)"
+    media_json=$(fetch_media_from_rss "$feed_to_use" || true)
   fi
 
   if [ -z "$media_json" ]; then
+    echo "media selection produced no result for ${feed_label}; starting browser without media" >&2
     return 1
   fi
 
-  media_url=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(json.load(sys.stdin)['url'])" 2>/dev/null || true)
-  is_audio=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(str(json.load(sys.stdin)['is_audio']).lower())" 2>/dev/null || echo "false")
-  thumbnail=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(json.load(sys.stdin)['thumbnail'])" 2>/dev/null || true)
+  media_url=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(json.load(sys.stdin).get('url', ''))" 2>/dev/null || true)
+  embed_id=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(json.load(sys.stdin).get('embed_id', ''))" 2>/dev/null || true)
+  is_audio=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(str(json.load(sys.stdin).get('is_audio', False)).lower())" 2>/dev/null || echo "false")
+  thumbnail=$(printf '%s' "$media_json" | python3 -c "import sys, json; print(json.load(sys.stdin).get('thumbnail', ''))" 2>/dev/null || true)
   media_url_js=$(printf '%s' "$media_url" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
+  embed_id_js=$(printf '%s' "$embed_id" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
   thumbnail_js=$(printf '%s' "$thumbnail" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
   weather_url_js=$(printf '%s' "$WEATHER_URL" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
 
-  if [ -z "$media_url" ]; then
+  if [ -z "$media_url" ] && [ -z "$embed_id" ]; then
+    echo "media selection for ${feed_label} returned neither a stream url nor an embed id: ${media_json:0:200}" >&2
     return 1
+  fi
+
+  if [ -n "$embed_id" ]; then
+    EMBED_MODE=1
+    echo "media ready: embedding ${INVIDIOUS_BASE_URL}/embed/${embed_id} (${feed_label})" >&2
+  else
+    EMBED_MODE=0
+    echo "media ready: direct stream from ${feed_label}" >&2
   fi
 
   mkdir -p "$CACHE_DIR"
@@ -524,6 +561,19 @@ video, audio {
   transform: translateX(-50%);
   width: 80%;
   max-width: 600px;
+  display: block;
+}
+#embed-container {
+  position: fixed;
+  inset: 0;
+  display: none;
+  background: #000;
+  z-index: 1;
+}
+#embed-container iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
   display: block;
 }
 #overlay {
@@ -590,6 +640,7 @@ video, audio {
 <div id="audio-container">
   <audio id="audio-player" controls controlslist="nodownload noplaybackrate" preload="auto"></audio>
 </div>
+<div id="embed-container"></div>
 <audio id="tts" preload="auto"></audio>
 <div id="splash">Good Morning,<br>Time to get up!</div>
 <div id="hud">
@@ -607,6 +658,7 @@ const video = document.getElementById('player');
 const audioContainer = document.getElementById('audio-container');
 const audioPlayer = document.getElementById('audio-player');
 const overlay = document.getElementById('overlay');
+const embedContainer = document.getElementById('embed-container');
 const timeEl = document.getElementById('time');
 const dateEl = document.getElementById('date');
 const weatherEl = document.getElementById('weather');
@@ -616,6 +668,10 @@ const intervalHud = document.getElementById('interval-hud');
 const intervalNameEl = document.getElementById('interval-name');
 const intervalTimeEl = document.getElementById('interval-time');
 const mediaUrl = $media_url_js;
+const embedId = $embed_id_js;
+const embedPlayerUrl = embedId
+  ? '${INVIDIOUS_BASE_URL}/embed/' + encodeURIComponent(embedId) + '?autoplay=1&muted=0'
+  : '';
 const isAudio = $is_audio;
 const thumbnail = $thumbnail_js;
 const weatherUrl = $weather_url_js;
@@ -724,7 +780,32 @@ function showCursor() {
   }, 3000);
 }
 
+function startEmbed() {
+  if (embedContainer.childElementCount > 0) {
+    return;
+  }
+  splash.style.display = 'none';
+  // allow="autoplay" delegates the autoplay permission into the frame, so the
+  // embedded player starts with sound and needs no synthetic click.
+  const frame = document.createElement('iframe');
+  frame.src = embedPlayerUrl;
+  frame.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
+  frame.setAttribute('allowfullscreen', '');
+  frame.setAttribute('title', 'Alarm video');
+  embedContainer.appendChild(frame);
+  embedContainer.style.display = 'block';
+  // The overlay stays on top on purpose: the scripted activation click lands on
+  // this document, which is what unlocks the TTS element for the interval
+  // announcements. It gets removed after that first click so the embedded
+  // player's own controls become reachable again.
+  startIntervals();
+}
+
 function startVideo() {
+  if (embedId) {
+    startEmbed();
+    return;
+  }
   if (isAudio) {
     if (audioPlayer.src) {
       return;
@@ -879,7 +960,9 @@ function announceInterval(index) {
   if (!interval) {
     return;
   }
-  const resumeVideo = pauseVideoForAlert();
+  // A cross-origin embed cannot be paused or resumed from here, so the
+  // announcement simply plays over the video.
+  const resumeVideo = embedId ? () => {} : pauseVideoForAlert();
   playTts(index).then(resumeVideo, resumeVideo);
 }
 
@@ -936,7 +1019,9 @@ function tickIntervals() {
   updateIntervalDisplay(remaining);
 }
 
-if (isAudio) {
+if (embedId) {
+  // Embedded player handles its own playback; nothing to wire up here.
+} else if (isAudio) {
   audioPlayer.addEventListener('loadedmetadata', () => {
     const rate = calculatePlaybackRate(audioPlayer.duration);
     audioPlayer.playbackRate = rate;
@@ -959,6 +1044,12 @@ if (isAudio) {
 }
 
 overlay.addEventListener('click', () => {
+  if (embedId) {
+    // This click exists to give this document user activation (the embed
+    // autoplays on its own via allow="autoplay"). Drop the overlay afterwards.
+    overlay.style.display = 'none';
+    return;
+  }
   const player = isAudio ? audioPlayer : video;
   if (player.paused) {
     tryPlay();
@@ -971,7 +1062,7 @@ overlay.addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.code === 'Space') {
+  if (event.code === 'Space' && !embedId) {
     event.preventDefault();
     const player = isAudio ? audioPlayer : video;
     if (player.paused) {
@@ -1018,15 +1109,21 @@ start_video_playback() {
     wlrctl toplevel fullscreen app_id:brave-browser
   fi
 
-  if [ -x "$YDOTOOL_BIN" ]; then
-    (
-      export YDOTOOL_SOCKET="$YDOTOOL_SOCKET_PATH"
-      sleep "$ALARM_VIDEO_DELAY_SECONDS"
-      sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
-      "$YDOTOOL_BIN" mousemove --absolute 517 312
-      "$YDOTOOL_BIN" click 0xC0
-    ) &
+  if [ ! -x "$YDOTOOL_BIN" ]; then
+    echo "ydotool missing at ${YDOTOOL_BIN}; nothing will click to start playback/unlock TTS" >&2
+    return 0
   fi
+
+  # In embed mode this click no longer starts the video (the embed autoplays);
+  # it supplies the user activation the parent document needs to play the TTS
+  # interval announcements. It lands on the parent overlay, never the embed.
+  (
+    export YDOTOOL_SOCKET="$YDOTOOL_SOCKET_PATH"
+    sleep "$ALARM_VIDEO_DELAY_SECONDS"
+    sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
+    "$YDOTOOL_BIN" mousemove --absolute 517 312
+    "$YDOTOOL_BIN" click 0xC0
+  ) &
 }
 
 run_alarm() {
@@ -1038,17 +1135,22 @@ run_alarm() {
   fi
   set_volume_baseline
   local alarm_pid=""
+  local media_failed=0
   alarm_pid=$(start_alarm_sound || true)
-  prepare_latest_video || true
+  prepare_latest_video || media_failed=1
   start_video_playback
   if [ -n "$alarm_pid" ]; then
     wait "$alarm_pid" 2>/dev/null || true
   fi
   sleep "$ALARM_POST_SOUND_DELAY_SECONDS"
+  if [ "$media_failed" -ne 0 ]; then
+    echo "alarm completed WITHOUT video or interval announcements: media selection failed (see messages above)" >&2
+    return 1
+  fi
 }
 
 if [ "${1:-}" = "--trigger" ]; then
-  run_alarm
+  run_alarm || exit 1
   exit 0
 fi
 
