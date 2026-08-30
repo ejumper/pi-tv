@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-arm the alarm-clock transient timer after boot
+# The transient alarm-clock.timer does not survive a reboot, but the saved time
+# file does; this re-creates the timer from it at every boot.
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/tv/pi-tv/scripts/alarm-clock.sh --restore
+
+[Install]
+WantedBy=default.target

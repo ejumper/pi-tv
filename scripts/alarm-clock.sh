@@ -5,7 +5,10 @@ SCRIPTS_DIR="${HOME}/pi-tv/scripts"
 ALARM_DIR="${HOME}/.config/alarm-clock"
 ALARM_TIME_FILE="${ALARM_DIR}/time"
 ALARM_UNIT="alarm-clock"
-CEC_DEV="/dev/cec1"
+# The TV is wired to the Pi's HDMI0 port. /dev/cec1 is the second HDMI port:
+# its device node always exists but nothing is attached, and cec-ctl reports
+# success when transmitting to it, so it must never be the default or a fallback.
+CEC_DEV="${CEC_DEV:-/dev/cec0}"
 ALARM_SOUND="${HOME}/pi-tv/tools/alarm.m4a"
 FEED_URL="https://www.democracynow.org/podcast-video.xml"
 INVIDIOUS_BASE_URL="https://tube.halfab.net"
@@ -67,7 +70,7 @@ schedule_alarm() {
   systemctl --user stop "${ALARM_UNIT}.timer" "${ALARM_UNIT}.service" >/dev/null 2>&1 || true
   if ! systemd-run --user --unit="$ALARM_UNIT" \
     --on-calendar="*-*-* ${time}:00" \
-    "$SCRIPTS_DIR/alarm-clock.sh" --trigger >/dev/null; then
+    "$SCRIPTS_DIR/alarm-clock.sh" --trigger >/dev/null 2>&1; then
     return 1
   fi
 }
@@ -86,37 +89,50 @@ parse_time() {
   printf '%02d:%02d' "$((10#$hh))" "$((10#$mm))"
 }
 
+cec_phys_addr() {
+  cec-ctl -d "$1" -x 2>/dev/null \
+    | awk -F': *' '/Physical Address/ { gsub(/ /, "", $2); print $2; exit }'
+}
+
+# Usable means the adapter is wired to something the TV assigned an address to.
+# f.f.f.f (15.15.15.15) means "no topology / nothing connected".
+cec_usable() {
+  local pa
+  pa="$(cec_phys_addr "$1")"
+  [ -n "$pa" ] && [ "$pa" != "f.f.f.f" ] && [ "$pa" != "15.15.15.15" ]
+}
+
 detect_cec_dev() {
-  local dev state
-  for dev in /dev/cec*; do
+  local dev
+  for dev in /dev/cec0 /dev/cec1; do
     [ -e "$dev" ] || continue
-    state=$(cec-ctl -d "$dev" --playback -t 0 --give-device-power-status 2>/dev/null \
-      | awk '/pwr-state:/ {print $2; exit}')
-    if [ -n "$state" ]; then
+    if cec_usable "$dev"; then
       printf '%s\n' "$dev"
       return 0
     fi
   done
-  if [ -e /dev/cec1 ]; then
-    printf '%s\n' /dev/cec1
-    return 0
-  fi
-  if [ -e /dev/cec0 ]; then
-    printf '%s\n' /dev/cec0
-    return 0
-  fi
   return 1
 }
 
+cec_power_state() {
+  cec-ctl -d "$CEC_DEV" --playback -t 0 --give-device-power-status 2>/dev/null \
+    | awk '/pwr-state:/ {print $2; exit}'
+}
+
 tv_is_on() {
-  local state
-  state=$(cec-ctl -d "$CEC_DEV" --playback -t 0 --give-device-power-status 2>/dev/null \
-    | awk '/pwr-state:/ {print $2; exit}')
-  case "$state" in
-    on|to-on) return 0 ;;
-    standby|to-standby) return 1 ;;
-    *) return 0 ;;
-  esac
+  local state attempt
+  for attempt in 1 2 3; do
+    state="$(cec_power_state)"
+    case "$state" in
+      on|to-on) return 0 ;;
+      standby|to-standby) return 1 ;;
+    esac
+    sleep 0.5
+  done
+  # No usable answer: report OFF so the alarm attempts the power-on. Treating
+  # "could not read the state" as "already on" silently skipped waking the TV.
+  echo "CEC power status unreadable on ${CEC_DEV}; assuming the TV is off" >&2
+  return 1
 }
 
 set_volume_baseline() {
@@ -1048,6 +1064,13 @@ overlay.addEventListener('click', () => {
     // This click exists to give this document user activation (the embed
     // autoplays on its own via allow="autoplay"). Drop the overlay afterwards.
     overlay.style.display = 'none';
+    // The first announcement is usually attempted before this click arrives
+    // (video start ≈ 21s, click ≈ 27s) and gets parked here — speak it now.
+    if (pendingTtsIndex !== null) {
+      const idx = pendingTtsIndex;
+      pendingTtsIndex = null;
+      playTts(idx);
+    }
     return;
   }
   const player = isAudio ? audioPlayer : video;
@@ -1130,8 +1153,14 @@ run_alarm() {
   ensure_wifi_connected || true
   CEC_DEV="$(detect_cec_dev || printf '%s' "$CEC_DEV")"
   if ! tv_is_on; then
-    "$SCRIPTS_DIR/tv-toggle.sh"
+    echo "TV off or state unknown; running tv-toggle.sh on ${CEC_DEV}" >&2
+    "$SCRIPTS_DIR/tv-toggle.sh" || echo "tv-toggle.sh exited nonzero; continuing the alarm anyway" >&2
     sleep 1
+    if tv_is_on; then
+      echo "TV is on" >&2
+    else
+      echo "WARNING: TV still not reporting power-on after tv-toggle.sh" >&2
+    fi
   fi
   set_volume_baseline
   local alarm_pid=""
@@ -1167,6 +1196,30 @@ if [ "${1:-}" = "--set" ]; then
   show_alarm_set "$alarm_time" >/dev/null 2>&1 &
   echo "Alarm set for $alarm_time"
   exit 0
+fi
+
+if [ "${1:-}" = "--restore" ]; then
+  # The transient alarm-clock.timer does not survive a reboot; this file does.
+  # Called by alarm-restore.service at boot to re-arm from the saved time.
+  if [ ! -f "$ALARM_TIME_FILE" ]; then
+    echo "alarm-restore: no saved alarm time; nothing to re-arm" >&2
+    exit 0
+  fi
+  saved_time=$(cat "$ALARM_TIME_FILE" 2>/dev/null || true)
+  if ! alarm_time=$(parse_time "$saved_time"); then
+    echo "alarm-restore: invalid saved time '${saved_time}'; not scheduling" >&2
+    exit 1
+  fi
+  if systemctl --user is-active --quiet "${ALARM_UNIT}.timer"; then
+    echo "alarm-restore: ${ALARM_UNIT}.timer already active" >&2
+    exit 0
+  fi
+  if schedule_alarm "$alarm_time"; then
+    echo "alarm-restore: re-armed ${ALARM_UNIT}.timer for ${alarm_time}" >&2
+    exit 0
+  fi
+  echo "alarm-restore: failed to schedule ${alarm_time}" >&2
+  exit 1
 fi
 
 placeholder="--:--"
