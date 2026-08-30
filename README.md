@@ -23,7 +23,7 @@ Everything assumes `/home/tv/pi-tv/`. If the tree moves, update:
 ## Services
 
 - `remote-site.service` (user) - web remote on :8081
-- `alarm-clock.timer` (transient, user) - created by `alarm-clock.sh --set HHMM`
+- `alarm-clock.timer` (transient, user) - created by `alarm-clock.sh --set HHMM`; re-created at boot by `alarm-restore.service` from the saved time file
 - `ydotoold.service` (system) - input injection daemon
 - `screen-dim-on/off.service` (user, timer-driven)
 
