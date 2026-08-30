@@ -26,6 +26,10 @@ ALARM_VIDEO_DELAY_SECONDS=21
 ALARM_VIDEO_DELAY_MS=$((ALARM_VIDEO_DELAY_SECONDS * 1000))
 ALARM_VIDEO_CLICK_DELAY_SECONDS=6
 ALARM_POST_SOUND_DELAY_SECONDS=60
+# Wake, input claim and the volume baseline run before the alarm sound can
+# start (~78s measured end-to-end). The timer fires this many seconds EARLY so
+# the sound begins at the requested time. Tune here if the TV speed changes.
+ALARM_LEAD_SECONDS=78
 WIFI_FALLBACK_SSID="mesh-node"
 WIFI_RECONNECT_TIMEOUT_SECONDS=45
 WIFI_RECONNECT_POLL_SECONDS=2
@@ -65,14 +69,21 @@ cancel_alarm() {
 
 schedule_alarm() {
   local time="$1"
+  local fire_time
+  # Trigger early: pre-sound work (TV wake, input claim, volume baseline) eats
+  # ~ALARM_LEAD_SECONDS, so schedule the timer that much before the set time.
+  # A daily calendar spec with seconds handles the midnight wrap for free
+  # ("--set 0001" fires at 23:59:42 each night).
+  fire_time=$(date -d "${time} ${ALARM_LEAD_SECONDS} seconds ago" +%H:%M:%S) || return 1
   mkdir -p "$ALARM_DIR"
   printf '%s\n' "$time" >"$ALARM_TIME_FILE"
   systemctl --user stop "${ALARM_UNIT}.timer" "${ALARM_UNIT}.service" >/dev/null 2>&1 || true
   if ! systemd-run --user --unit="$ALARM_UNIT" \
-    --on-calendar="*-*-* ${time}:00" \
+    --on-calendar="*-*-* ${fire_time}" \
     "$SCRIPTS_DIR/alarm-clock.sh" --trigger >/dev/null 2>&1; then
     return 1
   fi
+  echo "trigger scheduled for ${fire_time} (${ALARM_LEAD_SECONDS}s before ${time})" >&2
 }
 
 parse_time() {
