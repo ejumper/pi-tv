@@ -23,6 +23,8 @@ const COMMANDS = {
     'menu':      '/home/tv/pi-tv/scripts/script-menu.sh',
     'skip-back': 'wtype -k j',
     'skip-fwd':  'wtype -k l',
+    'speed-down': 'wtype -k less',
+    'speed-up':   'wtype -k greater',
 };
 
 function runCmd(cmd) {

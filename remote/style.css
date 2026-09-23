@@ -19,7 +19,7 @@ body {
 /* ─────────────────────────────────────────────
    Main container
    Full viewport height, max 900px wide.
-   Nav (1fr) absorbs whatever the four fixed
+   Nav (1fr) absorbs whatever the five fixed
    rows + gaps don't consume, so the grid always
    totals exactly 100dvh.
 ───────────────────────────────────────────── */
@@ -28,7 +28,7 @@ body {
     max-width: 900px;
     height: 100dvh;
     display: grid;
-    grid-template-rows: 14dvh 10dvh 1fr 10dvh 15dvh;
+    grid-template-rows: 14dvh 10dvh 10dvh 1fr 10dvh 15dvh;
     grid-template-columns: 100%;
     row-gap: 8px;
 }
@@ -75,7 +75,7 @@ body {
 }
 
 /* ─────────────────────────────────────────────
-   Nav container  (1fr ≈ 61dvh – gaps)
+   Nav container  (1fr ≈ 41dvh – gaps)
    D-pad centred, with side margins that grow
    proportionally as the viewport widens so the
    control doesn't sprawl on tall/thin screens.
@@ -83,13 +83,13 @@ body {
    --sp  : side padding, clamps from 16 px →
            5 vw → 80 px as the viewport widens.
    --dpad-size : largest square that fits the
-           nav height (50dvh cap) and the
+           nav height (40dvh cap) and the
            padded width simultaneously.
 ───────────────────────────────────────────── */
 :root {
     --sp: clamp(50px, 14vw, 140px);
     --icon-size: min(8dvh, 56px);
-    --dpad-size: min(50dvh, calc(100vw - 2 * var(--sp)), 800px);
+    --dpad-size: min(40dvh, calc(100vw - 2 * var(--sp)), 800px);
 
     --d-side:   calc(var(--dpad-size) *  72 / 264);
     --d-center: calc(var(--dpad-size) * 120 / 264);
@@ -235,7 +235,19 @@ body {
 }
 
 /* ─────────────────────────────────────────────
-   Vol container  (10dvh, under power separator)
+   Speed container  (10dvh, under power separator)
+   SPD− / SPD+ playback speed (< / >) with equal
+   spacing, vertically centred. Sits between the
+   power separator and the vol row.
+───────────────────────────────────────────── */
+.speed-cont {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+}
+
+/* ─────────────────────────────────────────────
+   Vol container  (10dvh)
    VOL− / VOL+ with equal spacing, vertically centred.
 ───────────────────────────────────────────── */
 .vol-cont {
@@ -244,7 +256,8 @@ body {
     justify-content: space-evenly;
 }
 
-.vol-btn {
+.vol-btn,
+.speed-btn {
     width: 40%;
     height: min(9dvh, 54px);
     background: rgba(0, 0, 0, 0.2);
@@ -258,7 +271,8 @@ body {
     transition: background 0.1s, border-color 0.1s;
 }
 
-.vol-btn:active {
+.vol-btn:active,
+.speed-btn:active {
     background: rgba(0, 0, 0, 0.4);
     border-color: rgba(255, 255, 255, 0.35);
 }

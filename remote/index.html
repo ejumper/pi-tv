@@ -7,8 +7,8 @@
     <meta name="theme-color" content="#555555">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <link rel="stylesheet" href="style.css?v=3">
-    <script defer src="remote.js?v=3"></script>
+    <link rel="stylesheet" href="style.css?v=4">
+    <script defer src="remote.js?v=4"></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </head>
 <body>
@@ -25,6 +25,11 @@
                 <button class="mode-btn" id="btn-keyboard-mode" aria-label="Keyboard">KB</button>
                 <button class="mode-btn" id="btn-trackpad-mode" aria-label="Trackpad">TP</button>
             </div>
+        </div>
+
+        <div class="speed-cont">
+            <button class="speed-btn" id="btn-speed-down" aria-label="Playback Speed Down">SPD −</button>
+            <button class="speed-btn" id="btn-speed-up"   aria-label="Playback Speed Up">SPD +</button>
         </div>
 
         <div class="vol-cont">

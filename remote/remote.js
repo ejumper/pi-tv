@@ -18,7 +18,7 @@ function sendCmd(payload) {
 }
 
 // ── Remote buttons ────────────────────────────────────────────────────────────
-['power','vol-up','vol-down','up','down','left','right','enter','tab','home','escape','menu','skip-back','skip-fwd']
+['power','vol-up','vol-down','speed-up','speed-down','up','down','left','right','enter','tab','home','escape','menu','skip-back','skip-fwd']
     .forEach(cmd => {
         const btn = document.getElementById('btn-' + cmd);
         if (btn) btn.addEventListener('click', () => sendCmd({ cmd }));
