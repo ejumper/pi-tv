@@ -1,4 +1,4 @@
-const CACHE = 'remote-v4';
+const CACHE = 'remote-v5';
 const ASSETS = [
     '/',
     '/style.css',

@@ -237,13 +237,15 @@ body {
 /* ─────────────────────────────────────────────
    Speed container  (10dvh, under power separator)
    SPD− / SPD+ playback speed (< / >) with equal
-   spacing, vertically centred. Sits between the
-   power separator and the vol row.
+   spacing. Padding pulls the buttons down toward
+   the vol row (paired with .vol-cont below) so the
+   SPD↔VOL gap is half what centring alone gives.
 ───────────────────────────────────────────── */
 .speed-cont {
     display: flex;
     align-items: center;
     justify-content: space-evenly;
+    padding-top: calc((10dvh - min(9dvh, 54px)) / 2 + 4px);
 }
 
 /* ─────────────────────────────────────────────
@@ -254,6 +256,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-evenly;
+    padding-bottom: calc((10dvh - min(9dvh, 54px)) / 2 + 4px);
 }
 
 .vol-btn,
