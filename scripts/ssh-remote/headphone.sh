@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAC="00:25:D1:4F:C5:B0"
-MAC_UNDER="${MAC//:/_}"
+MAC="00:25:D1:4F:C5:B0"   # MAJOR V
+NAME="MAJOR V"
+
+# wpctl status sink id for a device, matched on its description (e.g. "80.")
+sink_id_by_name() {
+    wpctl status | awk -v name="$1" '
+        /Sinks:/ {s=1}
+        /Sources:|Filters:|Streams:/ {s=0}
+        s && index($0, name) {
+            for (i=1; i<=NF; i++)
+                if ($i ~ /^[0-9]+\.$/) { sub(/\.$/, "", $i); print $i; exit }
+        }'
+}
 
 if bluetoothctl info "$MAC" 2>/dev/null | grep -q "Connected: yes"; then
     bluetoothctl disconnect "$MAC"
-    hdmi_sink=$(pactl list sinks short 2>/dev/null | grep -i hdmi | awk '{print $2}' | head -1)
-    [ -n "$hdmi_sink" ] && pactl set-default-sink "$hdmi_sink" && echo "Audio → $hdmi_sink"
+    hdmi=$(sink_id_by_name "HDMI")
+    [ -n "$hdmi" ] && wpctl set-default "$hdmi" && echo "Audio → HDMI"
     exit 0
 fi
 
-bluetoothctl connect "$MAC"
+# || true: headphones may be off; the wait loop below reports the failure
+bluetoothctl connect "$MAC" || true
 
 for _ in $(seq 1 20); do
-    sink=$(pactl list sinks short 2>/dev/null | grep -i "$MAC_UNDER" | awk '{print $2}' | head -1)
+    sink=$(sink_id_by_name "$NAME")
     if [ -n "$sink" ]; then
-        pactl set-default-sink "$sink"
-        echo "Audio → $sink"
+        wpctl set-default "$sink"
+        echo "Audio → $NAME"
         exit 0
     fi
     sleep 0.5
