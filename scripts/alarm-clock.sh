@@ -31,9 +31,11 @@ YDOTOOL_SOCKET_PATH="/tmp/ydotoold.socket"
 WEATHER_LAT="33.5657"
 WEATHER_LON="-97.1801"
 WEATHER_URL="https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}&current=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=America%2FChicago"
-ALARM_VIDEO_DELAY_SECONDS=21
-ALARM_VIDEO_DELAY_MS=$((ALARM_VIDEO_DELAY_SECONDS * 1000))
-ALARM_VIDEO_CLICK_DELAY_SECONDS=6
+# The page preloads media the moment it opens (the alarm sound is already
+# playing by then). ALARM_CLICK1_DELAY_SECONDS later a scripted click gives the
+# document user activation for TTS; playback itself is sequenced by the page:
+# jingle -> good morning voice -> media.
+ALARM_CLICK1_DELAY_SECONDS=3
 ALARM_POST_SOUND_DELAY_SECONDS=60
 # Media resolution runs in the background while the TV wakes and the alarm sound
 # plays, so retries cost nothing the user is standing there waiting for. This is
@@ -47,13 +49,17 @@ FETCH_CONNECT_TIMEOUT_SECONDS=10
 FETCH_MAX_TIME_SECONDS=60
 FETCH_RETRIES=3
 FETCH_RETRY_DELAY_SECONDS=3
-# Page-side watchdog: if the video has not actually started rendering this long
-# after the page opens, switch to the same episode's audio-only enclosure.
+# Page-side watchdog: once playback is actually attempted, a video that has
+# not started rendering this long is swapped for the same episode's audio-only
+# enclosure.
 ALARM_MEDIA_FALLBACK_MS=45000
-# Weekend equivalent. A cross-origin embed only exposes one honest signal to the
-# parent page - whether the frame finished loading - so this catches an instance
-# that is down or crawling, not a player that loaded and then stalled.
-EMBED_LOAD_FALLBACK_MS=30000
+# Weekend equivalent. The embed iframe is inserted the moment the page opens,
+# so it has the whole jingle+voice window to load; if it still has no load
+# event this long after playback was attempted, the page drops to the
+# audio-only stream. A cross-origin embed only exposes one honest signal to
+# the parent page - whether the frame finished loading - so a player that
+# loads and then stalls remains undetectable (a real limit, not an oversight).
+EMBED_LOAD_GRACE_MS=5000
 # Set to 1 to run weekend playlists as audio only (the instance still picks the
 # video, we take its audio-only stream). Roughly a fortieth of the data, and it
 # gains the 1.0-1.7x speed-up that embeds cannot have. Use it when the link or
@@ -62,10 +68,48 @@ WEEKEND_AUDIO_ONLY="${WEEKEND_AUDIO_ONLY:-0}"
 # Testing knob: pretend to be another day of the week (1=Mon .. 7=Sun) so the
 # weekend playlist path can be exercised on any day.
 ALARM_DAY_OVERRIDE="${ALARM_DAY_OVERRIDE:-}"
-# Wake, input claim and the volume baseline run before the alarm sound can
-# start (~78s measured end-to-end). The timer fires this many seconds EARLY so
-# the sound begins at the requested time. Tune here if the TV speed changes.
-ALARM_LEAD_SECONDS=78
+# The timer fires this many seconds EARLY. Inside the window: TV wake, input
+# claim, volume baseline, media pick-up and page build; the script then idles
+# out the remainder so the alarm sound starts at the exact set time. Tune here
+# if the TV speed changes.
+ALARM_LEAD_SECONDS=90
+
+# --- Video pre-download ------------------------------------------------------
+# A second transient timer fires PREDOWNLOAD_MINUTES before the alarm and
+# pulls the weekday video onto the SD card, so morning playback reads from disk
+# instead of racing the network. The Democracy Now podcast feed exposes exactly
+# ONE video rendition (640x360 h264, ~230MB; every -hd/-720/-1080 variant on
+# the CDN 404s, verified 2026-10-08), so that file is the reasonable quality
+# choice: it is the same stream that used to play live at 9am. If a better
+# feed ever exists, point PREDOWNLOAD_FEED_URL at it. Whenever no fresh
+# download is waiting at trigger time, the alarm streams exactly as before.
+PREDOWNLOAD_UNIT="alarm-predownload"
+PREDOWNLOAD_ENABLED="${PREDOWNLOAD_ENABLED:-1}"
+PREDOWNLOAD_MINUTES=30
+PREDOWNLOAD_DIR="${CACHE_DIR}/predownload"
+PREDOWNLOAD_FILE="${PREDOWNLOAD_DIR}/today.mp4"
+PREDOWNLOAD_STATE="${PREDOWNLOAD_DIR}/state.json"
+PREDOWNLOAD_FEED_URL="$FEED_URL"
+# Feed unchanged (same episode as the last download)? Recheck this often until
+# the alarm time; if no new episode ever appears, the alarm streams instead.
+PREDOWNLOAD_RECHECK_SECONDS=600
+# Per-cycle curl budget: the hard cap is the alarm time itself (see the
+# timeout wrapper below); this is the per-attempt ceiling.
+PREDOWNLOAD_CONNECT_TIMEOUT_SECONDS=10
+PREDOWNLOAD_MAX_TIME_SECONDS=1500
+# Abort a transfer crawling under 10KB/s for a full minute: a stalled link
+# must not burn the whole budget doing nothing.
+PREDOWNLOAD_STALL_SPEED_BYTES=10240
+PREDOWNLOAD_STALL_SECONDS=60
+# Fresh downloads get curl's internal retries; RESUME attempts deliberately
+# get none - curl's retry+resume combination re-truncates the .part on this
+# CDN chain (verified 2026-10-08: it ate a 209MB partial), while a single
+# ranged continuation lands a clean 206.
+PREDOWNLOAD_RETRIES=3
+# Never start a download with less runway than this before the alarm.
+PREDOWNLOAD_MIN_RUNWAY_SECONDS=300
+# Sanity cap on a completed download.
+PREDOWNLOAD_MAX_BYTES=$((800 * 1024 * 1024))
 WIFI_FALLBACK_SSID="mesh-node"
 WIFI_RECONNECT_TIMEOUT_SECONDS=45
 WIFI_RECONNECT_POLL_SECONDS=2
@@ -106,60 +150,86 @@ show_alarm_set() {
 }
 
 cancel_alarm() {
-  systemctl --user stop "${ALARM_UNIT}.timer" "${ALARM_UNIT}.service" >/dev/null 2>&1 || true
+  systemctl --user stop "${ALARM_UNIT}.timer" "${ALARM_UNIT}.service" \
+    "${PREDOWNLOAD_UNIT}.timer" "${PREDOWNLOAD_UNIT}.service" >/dev/null 2>&1 || true
   rm -f "$ALARM_TIME_FILE"
 }
 
-schedule_alarm() {
-  local time="$1"
-  local fire_time previous_calendar error
-  # Trigger early: pre-sound work (TV wake, input claim, volume baseline) eats
-  # ~ALARM_LEAD_SECONDS, so schedule the timer that much before the set time.
-  # A daily calendar spec with seconds handles the midnight wrap for free
-  # ("--set 0001" fires at 23:59:42 each night).
-  fire_time=$(date -d "${time} ${ALARM_LEAD_SECONDS} seconds ago" +%H:%M:%S) || return 1
-
-  # Remember what is armed right now, so a failed re-arm can put it back instead
-  # of quietly leaving the alarm off.
+# Schedule (or replace) one transient daily timer. Each timer owns its
+# recovery: the previous OnCalendar is read back before stopping, and a failed
+# creation puts it back, so one bad --set can never silently disarm what was
+# armed.
+schedule_transient_timer() {
+  local unit="$1" fire_time="$2"; shift 2
+  local previous_calendar="" error transient_timer
   # Read the calendar back from the transient unit file when it exists: it holds
   # the exact string, whereas "systemctl show -p TimersCalendar" pads it with a
   # next_elapse field, and the space inside "*-*-* 13:53:42" is significant.
-  previous_calendar=""
-  local transient_timer="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/transient/${ALARM_UNIT}.timer"
+  transient_timer="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/transient/${unit}.timer"
   if [ -r "$transient_timer" ]; then
     previous_calendar=$(sed -n 's/^OnCalendar=//p' "$transient_timer" | head -1)
   fi
   if [ -z "$previous_calendar" ]; then
-    previous_calendar=$(systemctl --user show "${ALARM_UNIT}.timer" -p TimersCalendar --value 2>/dev/null \
+    previous_calendar=$(systemctl --user show "${unit}.timer" -p TimersCalendar --value 2>/dev/null \
       | sed -n 's/.*OnCalendar=\(.*[^[:space:]]\)[[:space:]]*;.*$/\1/p')
   fi
 
-  systemctl --user stop "${ALARM_UNIT}.timer" "${ALARM_UNIT}.service" >/dev/null 2>&1 || true
+  systemctl --user stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
   # A FAILED transient unit stays loaded indefinitely and systemd-run then refuses
   # to reuse the name ("already loaded or has a fragment file"), while stopping it
   # is not enough to unload it. Without this, one failed morning jams every later
   # --set: exactly how the alarm got silently stuck disarmed on 2026-08-31.
-  systemctl --user reset-failed "${ALARM_UNIT}.service" "${ALARM_UNIT}.timer" >/dev/null 2>&1 || true
+  systemctl --user reset-failed "${unit}.service" "${unit}.timer" >/dev/null 2>&1 || true
 
-  if ! error=$(systemd-run --user --unit="$ALARM_UNIT" \
+  if ! error=$(systemd-run --user --unit="$unit" \
     --on-calendar="*-*-* ${fire_time}" \
-    "$SCRIPTS_DIR/alarm-clock.sh" --trigger 2>&1); then
-    echo "could not create the alarm timer: ${error}" >&2
-    if [ -n "$previous_calendar" ] && systemd-run --user --unit="$ALARM_UNIT" \
+    "$@" 2>&1); then
+    echo "could not create ${unit}.timer: ${error}" >&2
+    if [ -n "$previous_calendar" ] && systemd-run --user --unit="$unit" \
       --on-calendar="$previous_calendar" \
-      "$SCRIPTS_DIR/alarm-clock.sh" --trigger >/dev/null 2>&1; then
-      echo "restored the previous schedule (${previous_calendar})" >&2
+      "$@" >/dev/null 2>&1; then
+      echo "restored the previous ${unit} schedule (${previous_calendar})" >&2
     else
-      echo "WARNING: the alarm is NOT armed" >&2
+      echo "WARNING: ${unit} is NOT armed" >&2
     fi
     return 1
   fi
+}
 
-  # Only record the time once the timer really exists, so the file the restore
+schedule_alarm() {
+  local time="$1"
+  local fire_time predownload_time
+  # The alarm trigger fires ALARM_LEAD_SECONDS early: TV wake, input claim and
+  # the volume baseline run inside that window, and the script then idles until
+  # the exact set time to start the alarm sound. A daily calendar spec with
+  # seconds handles the midnight wrap for free ("--set 0001" fires 23:59:30).
+  fire_time=$(date -d "${time} ${ALARM_LEAD_SECONDS} seconds ago" +%H:%M:%S) || return 1
+  # The pre-download timer fires PREDOWNLOAD_MINUTES before the alarm
+  # ("--set 0001" pre-downloads at 23:31). If that moment already passed
+  # today, the daily calendar simply first fires tomorrow - the alarm's stream
+  # fallback covers the skipped morning.
+  predownload_time=$(date -d "${time} $((PREDOWNLOAD_MINUTES * 60)) seconds ago" +%H:%M:%S) || return 1
+
+  # Best effort: a missed pre-download only costs bandwidth at trigger time
+  # (the alarm streams instead), so it must never block arming the alarm.
+  if ! schedule_transient_timer "$PREDOWNLOAD_UNIT" "$predownload_time" \
+    "$SCRIPTS_DIR/alarm-clock.sh" --pre-download; then
+    echo "continuing without the pre-download timer" >&2
+  fi
+
+  # The alarm timer is the one that matters; its helper restores the previous
+  # schedule itself when creation fails.
+  if ! schedule_transient_timer "$ALARM_UNIT" "$fire_time" \
+    "$SCRIPTS_DIR/alarm-clock.sh" --trigger; then
+    return 1
+  fi
+
+  # Only record the time once the alarm timer really exists, so the file the restore
   # unit reads at login can never claim an alarm that is not scheduled.
   mkdir -p "$ALARM_DIR"
   printf '%s\n' "$time" >"$ALARM_TIME_FILE"
   echo "trigger scheduled for ${fire_time} (${ALARM_LEAD_SECONDS}s before ${time})" >&2
+  echo "pre-download scheduled for ${predownload_time} (${PREDOWNLOAD_MINUTES}min before ${time})" >&2
 }
 
 parse_time() {
@@ -652,6 +722,139 @@ PY
   printf '%s\n' "${text:-Weather unavailable}"
 }
 
+# Pre-download today's weekday video so the alarm plays from disk instead of
+# racing the network. Runs from its own transient timer
+# (PREDOWNLOAD_MINUTES before the alarm). The rules:
+#   - yesterday's file is deleted BEFORE anything is attempted: only one
+#     download is ever kept, and a broken download must not leave a rerun
+#     behind that could pass for today's episode;
+#   - "same episode as the last one downloaded" is detected by comparing the
+#     feed's enclosure URL against the state file and rechecked every
+#     PREDOWNLOAD_RECHECK_SECONDS until the alarm; if no new episode ever
+#     appears, this gives up and the alarm streams instead;
+#   - downloads land in a .part file and are renamed into place only when
+#     complete, so the resolver can trust any file it finds;
+#   - the state file records which alarm date a download was FOR, which is
+#     what the resolver checks at trigger time (a midnight alarm downloads
+#     the evening before, and the dates still line up).
+run_pre_download() {
+  local day_of_week alarm_time alarm_epoch deadline last_url url thumb size media_json
+
+  if [ "$PREDOWNLOAD_ENABLED" != "1" ]; then
+    echo "pre-download: disabled (PREDOWNLOAD_ENABLED=0)" >&2
+    return 0
+  fi
+
+  day_of_week="${ALARM_DAY_OVERRIDE:-$(date +%u)}"
+  if [ "$day_of_week" -eq 6 ] || [ "$day_of_week" -eq 7 ]; then
+    echo "pre-download: weekend; the Invidious embed path cannot be pre-downloaded" >&2
+    return 0
+  fi
+
+  if [ ! -r "$ALARM_TIME_FILE" ]; then
+    echo "pre-download: no alarm time file; cannot compute the deadline" >&2
+    return 1
+  fi
+  alarm_time=$(cat "$ALARM_TIME_FILE" 2>/dev/null || true)
+  if ! alarm_time=$(parse_time "$alarm_time"); then
+    echo "pre-download: invalid alarm time '${alarm_time}'; not downloading" >&2
+    return 1
+  fi
+
+  alarm_epoch=$(date -d "today ${alarm_time}" +%s)
+  if [ "$alarm_epoch" -le "$(date +%s)" ]; then
+    # Midnight wrap: a 00:15 alarm pre-downloads at 23:45 the evening before.
+    alarm_epoch=$(date -d "tomorrow ${alarm_time}" +%s)
+  fi
+  deadline="$alarm_epoch"
+
+  mkdir -p "$PREDOWNLOAD_DIR"
+
+  # Today's video is already on disk for this exact alarm (e.g. a manual rerun
+  # of this mode): keep it, deleting it would only cost a re-download.
+  if [ -s "$PREDOWNLOAD_FILE" ] \
+    && [ "$(json_field "$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)" alarm_date)" = "$(date -d "@${alarm_epoch}" +%F)" ]; then
+    echo "pre-download: this alarm's video is already on disk" >&2
+    return 0
+  fi
+
+  # Yesterday's bytes go NOW, before any network work: even a dead morning
+  # must not leave a stale episode the alarm could mistake for fresh.
+  rm -f "$PREDOWNLOAD_FILE" "$PREDOWNLOAD_DIR"/*.part
+
+  last_url=$(json_field "$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)" url)
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    media_json=$(fetch_media_from_rss "$PREDOWNLOAD_FEED_URL" || true)
+    url=$(json_field "$media_json" url)
+    if [ -z "$url" ] || [ "$(json_field "$media_json" is_audio false)" = "true" ]; then
+      echo "pre-download: feed unusable this cycle; recheck in ${PREDOWNLOAD_RECHECK_SECONDS}s" >&2
+    elif [ "$url" = "$last_url" ]; then
+      echo "pre-download: feed still shows the episode already downloaded; recheck in ${PREDOWNLOAD_RECHECK_SECONDS}s" >&2
+    else
+      if [ "$((deadline - $(date +%s)))" -lt "$PREDOWNLOAD_MIN_RUNWAY_SECONDS" ]; then
+        echo "pre-download: a new episode appeared but it is too close to the alarm; giving up (the alarm will stream)" >&2
+        break
+      fi
+      thumb=$(json_field "$media_json" thumbnail)
+      # The .part name carries a hash of the URL, so a resume can never glue
+      # together bytes of two different episodes if the feed changes mid-window.
+      url_hash=$(printf '%s' "$url" | md5sum | cut -c1-8)
+      part_file="${PREDOWNLOAD_DIR}/today.${url_hash}.part"
+      echo "pre-download: new episode, downloading $(basename "$url")" >&2
+      local range_args=() retries="$PREDOWNLOAD_RETRIES"
+      if [ -s "$part_file" ]; then
+        # Ranged continuation of the previous attempt's bytes. No internal
+        # retries here (see the knobs comment); a failed resume keeps the
+        # .part for the next cycle. A 33 means the server ignored the range:
+        # the partial is worthless, drop it.
+        range_args=(-C -)
+        retries=0
+        echo "pre-download: resuming from $(stat -c %s "$part_file") bytes" >&2
+      fi
+      # Bounded by the deadline (plus a minute of grace): a late attempt must
+      # not still be pulling bytes while the alarm is trying to stream or play.
+      local attempt_budget=$((deadline - $(date +%s) + 60))
+      local rc=0
+      timeout --kill-after=10 "$attempt_budget" curl -fsSL \
+        --connect-timeout "$PREDOWNLOAD_CONNECT_TIMEOUT_SECONDS" \
+        --max-time "$PREDOWNLOAD_MAX_TIME_SECONDS" \
+        --speed-limit "$PREDOWNLOAD_STALL_SPEED_BYTES" \
+        --speed-time "$PREDOWNLOAD_STALL_SECONDS" \
+        --retry "$retries" \
+        --retry-delay 5 \
+        --retry-all-errors \
+        "${range_args[@]}" \
+        -A alarm-clock \
+        -o "$part_file" "$url" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        size=$(stat -c %s "$part_file" 2>/dev/null || echo 0)
+        if [ "$size" -gt 0 ] && [ "$size" -le "$PREDOWNLOAD_MAX_BYTES" ]; then
+          mv -f "$part_file" "$PREDOWNLOAD_FILE"
+          python3 - "$url" "$thumb" "$(date -d "@${alarm_epoch}" +%F)" >"$PREDOWNLOAD_STATE" <<'PY'
+import json
+import sys
+
+print(json.dumps({"url": sys.argv[1], "thumbnail": sys.argv[2], "alarm_date": sys.argv[3]}))
+PY
+          echo "pre-download: complete ($((size / 1024 / 1024))MB) for the $(date -d "@${alarm_epoch}" +%F) alarm" >&2
+          return 0
+        fi
+        echo "pre-download: downloaded file failed the size check ($size bytes); removing" >&2
+        rm -f "$part_file"
+      elif [ "$rc" -eq 33 ]; then
+        echo "pre-download: server ignored the resume range; discarding the partial" >&2
+        rm -f "$part_file"
+      else
+        echo "pre-download: download attempt failed (rc=${rc}); the partial is kept for the next cycle in ${PREDOWNLOAD_RECHECK_SECONDS}s" >&2
+      fi
+    fi
+    sleep "$PREDOWNLOAD_RECHECK_SECONDS"
+  done
+
+  echo "pre-download: no new episode before the alarm; the alarm will stream" >&2
+  return 0
+}
+
 # resolve_media_json prints one JSON object describing this morning's media:
 #   {url, embed_id, is_audio, thumbnail, audio_fallback_url, source}
 # It is also a standalone mode ("--resolve-media") so run_alarm can run it in the
@@ -671,8 +874,24 @@ resolve_media_json() {
     source="altfeed2 (${ALTFEED2_PLAYLIST_ID:0:12})"
     media_json=$(fetch_media_from_invidious_playlist "$ALTFEED2_PLAYLIST_ID" "$ALTFEED_MIN_LENGTH_SECONDS" || true)
   else
-    source="$FEED_URL"
-    media_json=$(fetch_media_from_rss "$FEED_URL" || true)
+    # A fresh pre-downloaded file beats any streaming: zero trigger-time
+    # network dependence for the video itself. Valid means it was downloaded
+    # FOR this morning's alarm (the state file says which alarm date a
+    # download was for), so a missed pre-download day can never serve a rerun
+    # from disk. The url is relative to the player page's directory, which
+    # keeps a 230MB copy out of the cache dir.
+    local pd_state="" pd_date=""
+    pd_state=$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)
+    pd_date=$(json_field "$pd_state" alarm_date)
+    if [ -s "$PREDOWNLOAD_FILE" ] && [ "$pd_date" = "$(date +%F)" ]; then
+      source="pre-downloaded file ($(json_field "$pd_state" url))"
+      media_json=$(printf '{"url":"predownload/%s","is_audio":false,"thumbnail":%s}' \
+        "$(basename "$PREDOWNLOAD_FILE")" \
+        "$(printf '%s' "$(json_field "$pd_state" thumbnail)" | python3 -c 'import sys, json; sys.stdout.write(json.dumps(sys.stdin.read()))')")
+    else
+      source="$FEED_URL"
+      media_json=$(fetch_media_from_rss "$FEED_URL" || true)
+    fi
     # Small and cheap, so fetch it either way: the player page uses it to drop a
     # video that never starts (dead or very slow link) to audio only.
     audio_json=$(fetch_media_from_rss "$AUDIO_FEED_URL" || true)
@@ -743,12 +962,13 @@ start_media_resolution() {
   MEDIA_RESOLVE_PID=$!
 }
 
-# Blocks until the background resolver reports, up to its own budget plus slack.
-# Returns non-zero when nothing was resolved; the caller then still opens the
-# page, which runs the clock and the interval announcements without media.
+# Blocks until the background resolver reports, up to `limit` seconds (default:
+# its own budget plus slack). Returns non-zero when nothing was resolved; the
+# caller then still opens the page, which runs the clock and the interval
+# announcements without media.
 wait_for_media_resolution() {
   local waited=0
-  local limit=$((ALARM_MEDIA_BUDGET_SECONDS + 20))
+  local limit="${1:-$((ALARM_MEDIA_BUDGET_SECONDS + 20))}"
   MEDIA_RESOLVE_JSON=""
 
   if [ -z "$MEDIA_RESOLVE_PID" ]; then
@@ -812,6 +1032,34 @@ prepare_player_page() {
   VIDEO_READY=0
   EMBED_MODE=0
 
+  # The page sequences sound -> voice -> media, so it needs the alarm sound's
+  # real duration, and the scripted clicks need the first voice's. Measured off
+  # the files at build time (27.3s + 2.4s on 2026-10-08) with static fallbacks
+  # in case ffprobe or a file goes missing.
+  local jingle_s tts0_s tts0_file jingle_delay_ms
+  jingle_s=3
+  if [ -r "$ALARM_SOUND" ]; then
+    jingle_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$ALARM_SOUND" 2>/dev/null || echo 3)
+  fi
+  tts0_s=0
+  tts0_file=""
+  if [ -d "${HOME}/pi-tv/tools/tts" ]; then
+    tts0_file=$(find "${HOME}/pi-tv/tools/tts" -maxdepth 1 -type f -printf "%f\n" | sort -V | head -1)
+  fi
+  if [ -n "$tts0_file" ] && [ -r "${HOME}/pi-tv/tools/tts/${tts0_file}" ]; then
+    tts0_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${HOME}/pi-tv/tools/tts/${tts0_file}" 2>/dev/null || echo 0)
+  fi
+  # The page loads ~1.5s after the sound starts (brave tab spin-up), so the
+  # good morning voice fires jingle_len - 1.5s after the page appears: close
+  # enough to the true end of the jingle that they never meaningfully overlap,
+  # and never before it. The clamp keeps a missing/odd probe from firing the
+  # voice instantly.
+  jingle_delay_ms=$(awk -v j="$jingle_s" 'BEGIN { d = int(j * 1000) - 1500; if (d < 3000) d = 3000; print d }')
+  # Click 2 (embed only) lands just after the voice should end, measured from
+  # the clicks subshell starting (~1s after page open): jingle + voice + 1.5s.
+  CLICK2_DELAY_SECONDS=$(awk -v j="$jingle_s" -v t="$tts0_s" 'BEGIN { d = int(j + t + 1.5); if (d < 6) d = 6; print d }')
+  echo "page timing: jingle ${jingle_s}s, first voice ${tts0_s}s, click1 at ${ALARM_CLICK1_DELAY_SECONDS}s, click2 at ${CLICK2_DELAY_SECONDS}s" >&2
+
   media_url=$(json_field "$media_json" url)
   embed_id=$(json_field "$media_json" embed_id)
   is_audio=$(json_field "$media_json" is_audio false)
@@ -828,7 +1076,7 @@ prepare_player_page() {
     if [ "$is_audio" = "true" ]; then
       echo "media ready: audio-only stream from ${feed_label}" >&2
     else
-      echo "media ready: direct video stream from ${feed_label}" >&2
+      echo "media ready: video from ${feed_label}" >&2
       if [ -n "$audio_fallback_url" ]; then
         echo "audio-only fallback armed in case the video cannot start" >&2
       fi
@@ -933,19 +1181,8 @@ video, audio {
   display: none;
   pointer-events: none;
 }
-#splash {
+#media-note {
   position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  color: #fff;
-  font: 64px/1.2 "Sans";
-  background: #000;
-  z-index: 1;
-}
-#hud {
   position: fixed;
   top: 24px;
   left: 24px;
@@ -993,7 +1230,6 @@ video, audio {
 </div>
 <div id="embed-container"></div>
 <audio id="tts" preload="auto"></audio>
-<div id="splash">Good Morning,<br>Time to get up!</div>
 <div id="hud">
   <div id="time">--:--</div>
   <div id="date">----</div>
@@ -1015,7 +1251,6 @@ const mediaNote = document.getElementById('media-note');
 const timeEl = document.getElementById('time');
 const dateEl = document.getElementById('date');
 const weatherEl = document.getElementById('weather');
-const splash = document.getElementById('splash');
 const tts = document.getElementById('tts');
 const intervalHud = document.getElementById('interval-hud');
 const intervalNameEl = document.getElementById('interval-name');
@@ -1037,10 +1272,13 @@ const thumbnail = $thumbnail_js;
 // link. Empty when the day's media is already audio or a cross-origin embed.
 const audioFallbackUrl = $audio_fallback_url_js;
 const mediaStartFallbackMs = ${ALARM_MEDIA_FALLBACK_MS};
-const embedLoadFallbackMs = ${EMBED_LOAD_FALLBACK_MS};
 const hasMedia = Boolean(embedId || mediaUrl);
 const weatherUrl = $weather_url_js;
-const startDelayMs = ${ALARM_VIDEO_DELAY_MS};
+// The script starts the alarm sound and opens this page in the same breath;
+// this is the sound's remaining life once the page has loaded, after which the
+// good morning voice speaks and only then does media start.
+const jingleDelayMs = $jingle_delay_ms;
+const embedLoadGraceMs = ${EMBED_LOAD_GRACE_MS};
 const WEATHER_REFRESH_MS = 60 * 60 * 1000;
 const WEATHER_RETRY_MS = 5 * 60 * 1000;
 const WEATHER_TIMEOUT_MS = 10000;
@@ -1168,36 +1406,53 @@ function showCursor() {
   }, 3000);
 }
 
-function startEmbed() {
+// The iframe is inserted the moment the page opens (hidden) so it loads
+// during the jingle and the good morning voice instead of after them.
+function insertEmbedFrame() {
   if (embedContainer.childElementCount > 0) {
     return;
   }
-  splash.style.display = 'none';
   // allow="autoplay" delegates the autoplay permission into the frame, so the
-  // embedded player starts with sound and needs no synthetic click.
+  // embedded player starts with sound once clicked and needs no delegation.
   const frame = document.createElement('iframe');
   frame.src = embedPlayerUrl;
   frame.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
   frame.setAttribute('allowfullscreen', '');
   frame.setAttribute('title', 'Alarm video');
-  frame.addEventListener('load', stopMediaFallback);
-  if (audioFallbackUrl) {
-    // The only thing this page can honestly observe about a cross-origin embed
-    // is whether the frame loaded at all, so this covers an instance that is
-    // down or crawling rather than a player that stalls after loading.
-    mediaFallbackTimer = setTimeout(fallbackToAudio, embedLoadFallbackMs);
-  }
+  frame.addEventListener('load', () => {
+    embedFrameLoaded = true;
+    // Late load: arrived after startEmbed decided to wait, before the grace
+    // timeout gave up - reveal it as soon as the sequence reaches media.
+    if (intervalsStarted && !isAudio && embedContainer.childElementCount > 0) {
+      embedContainer.style.display = 'block';
+    }
+  });
   embedContainer.appendChild(frame);
-  embedContainer.style.display = 'block';
-  // The overlay stays on top on purpose: the scripted activation click lands on
-  // this document, which is what unlocks the TTS element for the interval
-  // announcements. It gets removed after that first click so the embedded
-  // player's own controls become reachable again.
-  startIntervals();
+}
+
+function startEmbed() {
+  if (embedFrameLoaded) {
+    embedContainer.style.display = 'block';
+    startIntervals(true);
+    return;
+  }
+  // The frame had the whole jingle+voice window and still no load event: a
+  // short grace, then the audio-only way out. The only thing this page can
+  // honestly observe about a cross-origin embed is whether the frame loaded at
+  // all, so a player that loads and then stalls remains undetectable.
+  setTimeout(() => {
+    if (embedFrameLoaded && embedContainer.childElementCount > 0) {
+      embedContainer.style.display = 'block';
+    } else {
+      fallbackToAudio();
+    }
+    startIntervals(true);
+  }, embedLoadGraceMs);
 }
 
 let mediaFallbackTimer = null;
 let mediaStarted = false;
+let embedFrameLoaded = false;
 
 function stopMediaFallback() {
   if (mediaFallbackTimer) {
@@ -1212,7 +1467,6 @@ function showMediaNote(text) {
 }
 
 function startAudioMode(url, isRecovery) {
-  splash.style.display = 'none';
   audioContainer.style.display = 'block';
   if (thumbnail) {
     audioContainer.style.backgroundImage = 'url(' + thumbnail + ')';
@@ -1233,17 +1487,28 @@ function startAudioMode(url, isRecovery) {
   }
 }
 
-function startVideoMode(url) {
-  splash.style.display = 'none';
-  video.style.display = 'block';
-  video.src = url;
-  video.load();
+// No media is a supported state, not an error: the clock, the interval countdown
+// and the announcements are all wall-clock based, so an alarm whose feeds are
+// unreachable still runs and still talks.
+function startMedia() {
+  if (!hasMedia) {
+    showMediaNote('no video this morning (network down?), clock and announcements only');
+    startIntervals(true);
+    return;
+  }
+
+  if (embedId) {
+    startEmbed();
+    return;
+  }
   if (audioFallbackUrl) {
-    // Nothing has been fetched yet here, so "never reaches playing" means the
-    // link is too slow or dead. Holding a black screen until noon helps nobody:
-    // drop to the audio-only enclosure, which needs about a ninth of the data.
+    // Playback is actually being attempted now, so a video that cannot start
+    // (dead or very slow link) has this long to prove itself before the page
+    // drops to the audio-only enclosure, which needs a ninth of the data.
     mediaFallbackTimer = setTimeout(fallbackToAudio, mediaStartFallbackMs);
   }
+  tryPlay();
+  startIntervals(true);
 }
 
 function fallbackToAudio() {
@@ -1266,28 +1531,6 @@ function fallbackToAudio() {
   }
   showMediaNote('video could not start on this connection, playing audio only');
   startAudioMode(audioFallbackUrl, true);
-}
-
-// No media is a supported state, not an error: the clock, the interval countdown
-// and the announcements are all wall-clock based, so an alarm whose feeds are
-// unreachable still runs and still talks.
-function startMedia() {
-  if (!hasMedia) {
-    splash.style.display = 'none';
-    showMediaNote('no video this morning (network down?), clock and announcements only');
-    startIntervals();
-    return;
-  }
-  if (embedId) {
-    startEmbed();
-    return;
-  }
-  if (isAudio) {
-    startAudioMode(mediaUrl, false);
-  } else {
-    startVideoMode(mediaUrl);
-  }
-  startIntervals();
 }
 
 function pauseVideoForAlert() {
@@ -1442,14 +1685,18 @@ function updateIntervalDisplay(secondsLeft) {
   intervalTimeEl.textContent = formatRemaining(secondsLeft);
 }
 
-function startIntervals() {
+function startIntervals(skipFirstAnnounce) {
   if (intervalsStarted || intervals.length === 0) {
     return;
   }
   intervalsStarted = true;
   intervalStart = performance.now();
   updateIntervalDisplay(intervals[0].seconds);
-  announceInterval(0);
+  // The good morning voice is spoken by the wakeup sequence before media
+  // starts, so the first interval is normally counted, not announced again.
+  if (skipFirstAnnounce !== true) {
+    announceInterval(0);
+  }
   intervalTimer = setInterval(tickIntervals, 250);
 }
 
@@ -1479,48 +1726,40 @@ function tickIntervals() {
   updateIntervalDisplay(remaining);
 }
 
+// Preload the media now so it is ready the moment the wakeup sequence ends.
+// Nothing plays here: the elements stay paused until the jingle and the good
+// morning voice have finished - playback is sequenced from jingleDelayMs.
+let preloadPlayer = null;
 if (embedId) {
-  // Embedded player handles its own playback; nothing to wire up here.
-} else if (isAudio) {
-  audioPlayer.addEventListener('loadedmetadata', () => {
-    const rate = calculatePlaybackRate(audioPlayer.duration);
-    audioPlayer.playbackRate = rate;
-    audioPlayer.defaultPlaybackRate = rate;
-    tryPlay();
-  });
-  audioPlayer.addEventListener('canplay', () => {
-    tryPlay();
-  });
-} else {
-  video.addEventListener('loadedmetadata', () => {
-    const rate = calculatePlaybackRate(video.duration);
-    video.playbackRate = rate;
-    video.defaultPlaybackRate = rate;
-    tryPlay();
-  });
-  video.addEventListener('canplay', () => {
-    tryPlay();
+  insertEmbedFrame();
+} else if (hasMedia) {
+  if (isAudio) {
+    audioContainer.style.display = 'block';
+    if (thumbnail) {
+      audioContainer.style.backgroundImage = 'url(' + thumbnail + ')';
+    }
+    audioPlayer.src = mediaUrl;
+    audioPlayer.load();
+    preloadPlayer = audioPlayer;
+  } else {
+    video.style.display = 'block';
+    video.src = mediaUrl;
+    video.load();
+    preloadPlayer = video;
+  }
+  preloadPlayer.addEventListener('loadedmetadata', () => {
+    const rate = calculatePlaybackRate(preloadPlayer.duration);
+    preloadPlayer.playbackRate = rate;
+    preloadPlayer.defaultPlaybackRate = rate;
   });
 }
 
 overlay.addEventListener('click', () => {
-  if (embedId || !hasMedia) {
-    // This click exists to give this document user activation (the embed
-    // autoplays on its own via allow="autoplay"). Drop the overlay afterwards.
-    overlay.style.display = 'none';
-    // The first announcement is usually attempted before this click arrives
-    // (video start ≈ 21s, click ≈ 27s) and gets parked here — speak it now.
-    if (pendingTtsIndex !== null) {
-      const idx = pendingTtsIndex;
-      pendingTtsIndex = null;
-      playTts(idx);
-    }
-    return;
-  }
-  const player = isAudio ? audioPlayer : video;
-  if (player.paused) {
-    tryPlay();
-  }
+  // Click 1 exists purely to give this document user activation (the TTS
+  // element needs it) and to drop the overlay so the player's own controls
+  // become reachable. It deliberately does NOT start playback: that is
+  // sequenced after the jingle and the good morning voice.
+  overlay.style.display = 'none';
   if (pendingTtsIndex !== null) {
     const idx = pendingTtsIndex;
     pendingTtsIndex = null;
@@ -1553,7 +1792,13 @@ video.addEventListener('playing', () => {
   stopMediaFallback();
 });
 
-setTimeout(startMedia, startDelayMs);
+// Wakeup sequence: when the alarm sound has finished, the good morning voice
+// speaks (it gets parked for the activation click if that has not landed yet),
+// and media starts when the voice resolves - ended, failed, or timed out.
+function beginWakeupSequence() {
+  playTts(0).then(startMedia, startMedia);
+}
+setTimeout(beginWakeupSequence, jingleDelayMs);
 </script>
 </body>
 </html>
@@ -1579,13 +1824,13 @@ open_player_page() {
 
 # Click 1 always fires, media or not: landing on the page overlay is what gives
 # the document the user activation the TTS element needs (Brave will not unlock
-# audio for a page nobody has interacted with). Click 2 is embed-only: it lands
-# on the embed's big play button — Invidious' player style puts it at the
-# top-left, (55,34) at 1080p, verified via CDP — and starts playback with a real
-# in-frame gesture, because the embed is deliberately loaded WITHOUT autoplay
-# (Brave ignores allow="autoplay" delegation from a file:// parent). Direct
-# streams start themselves, so the gap and the second click would only get in
-# the way. The delay between the clicks lets the wakeup voice finish first.
+# audio for a page nobody has interacted with). It must not start playback -
+# the page sequences that itself. Click 2 is embed-only and timed to land just
+# after the good morning voice ends, on the embed's big play button -
+# Invidious' player style puts it at the top-left, (55,34) at 1080p, verified
+# via CDP - starting playback with a real in-frame gesture, because the embed
+# is deliberately loaded WITHOUT autoplay (Brave ignores allow="autoplay"
+# delegation from a file:// parent). Direct streams are started by the page.
 start_scripted_clicks() {
   if [ ! -x "$YDOTOOL_BIN" ]; then
     echo "ydotool missing at ${YDOTOOL_BIN}; nothing will click to start playback/unlock TTS" >&2
@@ -1594,12 +1839,13 @@ start_scripted_clicks() {
 
   (
     export YDOTOOL_SOCKET="$YDOTOOL_SOCKET_PATH"
-    sleep "$ALARM_VIDEO_DELAY_SECONDS"
-    sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
+    sleep "$ALARM_CLICK1_DELAY_SECONDS"
     "$YDOTOOL_BIN" mousemove --absolute 517 312
     "$YDOTOOL_BIN" click 0xC0
     if [ "$EMBED_MODE" -eq 1 ]; then
-      sleep "$ALARM_VIDEO_CLICK_DELAY_SECONDS"
+      local remain=$((CLICK2_DELAY_SECONDS - ALARM_CLICK1_DELAY_SECONDS))
+      [ "$remain" -lt 1 ] && remain=1
+      sleep "$remain"
       "$YDOTOOL_BIN" mousemove --absolute 55 34
       "$YDOTOOL_BIN" click 0xC0
     fi
@@ -1607,11 +1853,13 @@ start_scripted_clicks() {
 }
 
 run_alarm() {
+  local set_epoch now_epoch wait_limit delta
   ensure_wifi_connected || true
   CEC_DEV="$(detect_cec_dev || printf '%s' "$CEC_DEV")"
-  # Resolve media first, in the background. TV wake, volume baseline and the
-  # alarm sound give the network ~78s of cover, so retries are free and a stalled
-  # wifi node costs a late video instead of no video.
+  # Resolve media first, in the background. With a pre-downloaded video this
+  # finishes in seconds (it never touches the video feed); otherwise the TV
+  # wake window gives the network ~90s of cover, so retries are free and a
+  # stalled wifi node costs a late video instead of no video.
   start_media_resolution
   if ! tv_is_on; then
     echo "TV off or state unknown; running tv-toggle.sh on ${CEC_DEV}" >&2
@@ -1624,14 +1872,38 @@ run_alarm() {
     fi
   fi
   set_volume_baseline
-  local alarm_pid=""
+  # Media resolution gets whatever is left of the lead window. Whatever has not
+  # resolved by the set time is dropped: the sound and the page start on time,
+  # and a media-less page still runs the clock and announcements (the floor).
+  set_epoch=$(date -d "today $(cat "$ALARM_TIME_FILE" 2>/dev/null || true)" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  wait_limit=$((set_epoch - now_epoch - 5))
+  if [ "$wait_limit" -lt 0 ]; then
+    wait_limit=0
+  fi
+  if [ "$wait_limit" -gt "$((ALARM_MEDIA_BUDGET_SECONDS + 20))" ]; then
+    wait_limit=$((ALARM_MEDIA_BUDGET_SECONDS + 20))
+  fi
   local media_failed=0
-  alarm_pid=$(start_alarm_sound || true)
-  wait_for_media_resolution || media_failed=1
+  wait_for_media_resolution "$wait_limit" || media_failed=1
   # Both of these run regardless of the result: the page carries the clock, the
   # interval countdown and the announcements, which is what still works when the
   # feeds are unreachable.
   prepare_player_page
+  # Idle out the rest of the lead window: the alarm sound belongs at the set
+  # time, not whenever the wake-up work happened to finish.
+  now_epoch=$(date +%s)
+  delta=$((set_epoch - now_epoch))
+  if [ "$delta" -gt 0 ]; then
+    if [ "$delta" -gt 300 ]; then
+      # Defensive cap: the timer should never fire this early.
+      delta=300
+    fi
+    echo "waiting ${delta}s for the set time" >&2
+    sleep "$delta"
+  fi
+  local alarm_pid=""
+  alarm_pid=$(start_alarm_sound || true)
   open_player_page
   start_scripted_clicks
   if [ -n "$alarm_pid" ]; then
@@ -1646,6 +1918,11 @@ run_alarm() {
 
 if [ "${1:-}" = "--resolve-media" ]; then
   resolve_media_json || exit 1
+  exit 0
+fi
+
+if [ "${1:-}" = "--pre-download" ]; then
+  run_pre_download || exit 1
   exit 0
 fi
 

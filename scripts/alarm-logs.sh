@@ -13,5 +13,7 @@ set -euo pipefail
 exec sudo journalctl \
   _SYSTEMD_USER_UNIT=alarm-clock.service \
   _SYSTEMD_USER_UNIT=alarm-clock.timer \
+  _SYSTEMD_USER_UNIT=alarm-predownload.service \
+  _SYSTEMD_USER_UNIT=alarm-predownload.timer \
   _SYSTEMD_USER_UNIT=alarm-restore.service \
   -o short "$@"
