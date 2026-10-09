@@ -10,6 +10,18 @@ ALARM_UNIT="alarm-clock"
 # success when transmitting to it, so it must never be the default or a fallback.
 CEC_DEV="${CEC_DEV:-/dev/cec0}"
 ALARM_SOUND="${HOME}/pi-tv/tools/alarm.m4a"
+# Which voice reads the morning announcements, per day (1=Mon .. 7=Sun). Each
+# name is a subdir of ~/pi-tv/tools/tts/voices/ holding that voice's rendered
+# 1.wav-5.wav. A set only wins when it is complete (at least as many files as
+# the default set); an incomplete or unknown voice falls back to the default
+# files in tools/tts/ for the whole morning.
+TTS_VOICE_MON="emma"
+TTS_VOICE_TUE="kirsten"
+TTS_VOICE_WED="natalie"
+TTS_VOICE_THU="myhala"
+TTS_VOICE_FRI="aimee"
+TTS_VOICE_SAT="elle"
+TTS_VOICE_SUN="keira"
 FEED_URL="https://www.democracynow.org/podcast-video.xml"
 # Same episode, audio only (~28 MB MP3 against the 264 MB 360p MP4). Used as the
 # player page's fallback when the video resolves but cannot start on a bad link,
@@ -1041,13 +1053,40 @@ prepare_player_page() {
   if [ -r "$ALARM_SOUND" ]; then
     jingle_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$ALARM_SOUND" 2>/dev/null || echo 3)
   fi
+  # Which voice reads this morning: the per-day variable picks a subdir of
+  # tools/tts/voices/, and it wins only when it holds a complete set (at least
+  # as many files as the default) - otherwise the default files read the whole
+  # morning. Half a morning in one voice and half in another would be worse
+  # than all of it in the default.
+  local day_of_week tts_dir voice_name="" voice_count=0 default_count=0
+  day_of_week="${ALARM_DAY_OVERRIDE:-$(date +%u)}"
+  case "$day_of_week" in
+    1) voice_name="$TTS_VOICE_MON" ;;
+    2) voice_name="$TTS_VOICE_TUE" ;;
+    3) voice_name="$TTS_VOICE_WED" ;;
+    4) voice_name="$TTS_VOICE_THU" ;;
+    5) voice_name="$TTS_VOICE_FRI" ;;
+    6) voice_name="$TTS_VOICE_SAT" ;;
+    7) voice_name="$TTS_VOICE_SUN" ;;
+  esac
+  tts_dir="${HOME}/pi-tv/tools/tts"
+  default_count=$(find "$tts_dir" -maxdepth 1 -name '*.wav' -type f 2>/dev/null | wc -l)
+  if [ -n "$voice_name" ] && [ -d "${tts_dir}/voices/${voice_name}" ]; then
+    voice_count=$(find "${tts_dir}/voices/${voice_name}" -maxdepth 1 -name '*.wav' -type f 2>/dev/null | wc -l)
+  fi
+  if [ "$voice_count" -gt 0 ] && [ "$voice_count" -ge "$default_count" ]; then
+    tts_dir="${tts_dir}/voices/${voice_name}"
+    echo "announcements voice: ${voice_name}" >&2
+  else
+    echo "announcements voice: default ('${voice_name}' missing or incomplete)" >&2
+  fi
   tts0_s=0
   tts0_file=""
-  if [ -d "${HOME}/pi-tv/tools/tts" ]; then
-    tts0_file=$(find "${HOME}/pi-tv/tools/tts" -maxdepth 1 -type f -printf "%f\n" | sort -V | head -1)
+  if [ -d "$tts_dir" ]; then
+    tts0_file=$(find "$tts_dir" -maxdepth 1 -type f -printf "%f\n" | sort -V | head -1)
   fi
-  if [ -n "$tts0_file" ] && [ -r "${HOME}/pi-tv/tools/tts/${tts0_file}" ]; then
-    tts0_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${HOME}/pi-tv/tools/tts/${tts0_file}" 2>/dev/null || echo 0)
+  if [ -n "$tts0_file" ] && [ -r "${tts_dir}/${tts0_file}" ]; then
+    tts0_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${tts_dir}/${tts0_file}" 2>/dev/null || echo 0)
   fi
   # The page loads ~1.5s after the sound starts (brave tab spin-up), so the
   # good morning voice fires jingle_len - 1.5s after the page appears: close
@@ -1097,10 +1136,13 @@ prepare_player_page() {
     cp -f "$ALARM_SOUND" "$CACHE_DIR/alarm.m4a"
   fi
   local tts_files=()
-  if [ -d "${HOME}/pi-tv/tools/tts" ]; then
-    mapfile -t tts_files < <(find "${HOME}/pi-tv/tools/tts" -maxdepth 1 -type f -printf "%f\n" | sort -V)
+  if [ -d "$tts_dir" ]; then
+    # Clear last morning's copies first so a stale default file can never
+    # survive next to a differently-shaped voice set.
+    rm -f "${CACHE_DIR}"/*.wav
+    mapfile -t tts_files < <(find "$tts_dir" -maxdepth 1 -type f -printf "%f\n" | sort -V)
     for tts_file in "${tts_files[@]}"; do
-      cp -f "${HOME}/pi-tv/tools/tts/${tts_file}" "${CACHE_DIR}/${tts_file}"
+      cp -f "${tts_dir}/${tts_file}" "${CACHE_DIR}/${tts_file}"
     done
   fi
   local tts_js="[]"
