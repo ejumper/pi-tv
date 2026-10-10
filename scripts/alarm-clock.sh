@@ -45,9 +45,13 @@ WEATHER_LON="-97.1801"
 WEATHER_URL="https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}&current=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=America%2FChicago"
 # The page preloads media the moment it opens (the alarm sound is already
 # playing by then). ALARM_CLICK1_DELAY_SECONDS later a scripted click gives the
-# document user activation for TTS; playback itself is sequenced by the page:
-# jingle -> good morning voice -> media.
+# document user activation for TTS; playback itself is sequenced by the page,
+# anchored to the WALL CLOCK: voice at set_time + jingle + ALARM_VOICE_GAP_MS,
+# media at voice end + ALARM_VIDEO_GAP_MS. (Anchoring to page-load once left a
+# multi-second silent gap after the jingle when brave was slow - 2026-10-09.)
 ALARM_CLICK1_DELAY_SECONDS=3
+ALARM_VOICE_GAP_MS=1500
+ALARM_VIDEO_GAP_MS=1500
 ALARM_POST_SOUND_DELAY_SECONDS=60
 # Media resolution runs in the background while the TV wakes and the alarm sound
 # plays, so retries cost nothing the user is standing there waiting for. This is
@@ -782,17 +786,40 @@ run_pre_download() {
 
   mkdir -p "$PREDOWNLOAD_DIR"
 
-  # Today's video is already on disk for this exact alarm (e.g. a manual rerun
-  # of this mode): keep it, deleting it would only cost a re-download.
+  # Today's video already on disk for this exact alarm? The date stamp alone
+  # is not proof: a download made the evening before (by a manual test, or by
+  # any run before the feed's ~07:00 publish) is stamped with the next
+  # morning's alarm date while still holding yesterday's episode. Trust the
+  # file only when its URL is still the feed's current episode. (2026-10-09:
+  # a stale stamped file passed the date check and played all morning.)
   if [ -s "$PREDOWNLOAD_FILE" ] \
     && [ "$(json_field "$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)" alarm_date)" = "$(date -d "@${alarm_epoch}" +%F)" ]; then
-    echo "pre-download: this alarm's video is already on disk" >&2
-    return 0
+    local state_json="" feed_now_url=""
+    state_json=$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)
+    feed_now_url=$(json_field "$(fetch_media_from_rss "$PREDOWNLOAD_FEED_URL" || true)" url)
+    if [ -z "$feed_now_url" ]; then
+      echo "pre-download: could not verify the on-disk file against the feed; keeping it" >&2
+      return 0
+    elif [ "$feed_now_url" = "$(json_field "$state_json" url)" ]; then
+      echo "pre-download: this alarm's video is already on disk and matches the feed" >&2
+      return 0
+    fi
+    echo "pre-download: on-disk file holds $(basename "$(json_field "$state_json" url)" .mp4 2>/dev/null || echo 'an old episode') but the feed is on $(basename "$feed_now_url"); re-downloading" >&2
+    rm -f "$PREDOWNLOAD_FILE"
+    # Keep a partial of the episode we are about to download (it resumes);
+    # only parts of OTHER episodes are worthless. Without this, every recheck
+    # cycle of a >10-minute download would re-enter this branch and restart
+    # from zero.
+    find "$PREDOWNLOAD_DIR" -maxdepth 1 -name '*.part' \
+      ! -name "today.$(printf '%s' "$feed_now_url" | md5sum | cut -c1-8).part" -delete
   fi
 
-  # Yesterday's bytes go NOW, before any network work: even a dead morning
-  # must not leave a stale episode the alarm could mistake for fresh.
-  rm -f "$PREDOWNLOAD_FILE" "$PREDOWNLOAD_DIR"/*.part
+  # Yesterday's FILE goes NOW, before any network work: even a dead morning
+  # must not leave a stale episode the alarm could mistake for fresh. (Parts
+  # are deliberately kept: they are hash-named per episode, so an old one can
+  # never contaminate a new download, and deleting them here would kill every
+  # resume before it started - that bug silently zeroed 60MB+ partials.)
+  rm -f "$PREDOWNLOAD_FILE"
 
   last_url=$(json_field "$(cat "$PREDOWNLOAD_STATE" 2>/dev/null || true)" url)
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -812,6 +839,10 @@ run_pre_download() {
       # together bytes of two different episodes if the feed changes mid-window.
       url_hash=$(printf '%s' "$url" | md5sum | cut -c1-8)
       part_file="${PREDOWNLOAD_DIR}/today.${url_hash}.part"
+      # Prune parts of other episodes; the current episode's part, if any, is
+      # what the resume below continues.
+      find "$PREDOWNLOAD_DIR" -maxdepth 1 -name '*.part' \
+        ! -name "today.${url_hash}.part" -delete
       echo "pre-download: new episode, downloading $(basename "$url")" >&2
       local range_args=() retries="$PREDOWNLOAD_RETRIES"
       if [ -s "$part_file" ]; then
@@ -1048,7 +1079,7 @@ prepare_player_page() {
   # real duration, and the scripted clicks need the first voice's. Measured off
   # the files at build time (27.3s + 2.4s on 2026-10-08) with static fallbacks
   # in case ffprobe or a file goes missing.
-  local jingle_s tts0_s tts0_file jingle_delay_ms
+  local jingle_s tts0_s tts0_file
   jingle_s=3
   if [ -r "$ALARM_SOUND" ]; then
     jingle_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$ALARM_SOUND" 2>/dev/null || echo 3)
@@ -1088,16 +1119,29 @@ prepare_player_page() {
   if [ -n "$tts0_file" ] && [ -r "${tts_dir}/${tts0_file}" ]; then
     tts0_s=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${tts_dir}/${tts0_file}" 2>/dev/null || echo 0)
   fi
-  # The page loads ~1.5s after the sound starts (brave tab spin-up), so the
-  # good morning voice fires jingle_len - 1.5s after the page appears: close
-  # enough to the true end of the jingle that they never meaningfully overlap,
-  # and never before it. The clamp keeps a missing/odd probe from firing the
-  # voice instantly.
-  jingle_delay_ms=$(awk -v j="$jingle_s" 'BEGIN { d = int(j * 1000) - 1500; if (d < 3000) d = 3000; print d }')
-  # Click 2 (embed only) lands just after the voice should end, measured from
-  # the clicks subshell starting (~1s after page open): jingle + voice + 1.5s.
-  CLICK2_DELAY_SECONDS=$(awk -v j="$jingle_s" -v t="$tts0_s" 'BEGIN { d = int(j + t + 1.5); if (d < 6) d = 6; print d }')
-  echo "page timing: jingle ${jingle_s}s, first voice ${tts0_s}s, click1 at ${ALARM_CLICK1_DELAY_SECONDS}s, click2 at ${CLICK2_DELAY_SECONDS}s" >&2
+  # The page anchors the good morning voice to the WALL CLOCK (the set time),
+  # not to its own load moment: brave's tab spin-up on a just-woken TV once
+  # took several seconds and left a long silent gap after the jingle
+  # (2026-10-09). Whatever the load lag, the voice fires at set_time + jingle
+  # + ALARM_VOICE_GAP_MS, and media at voice end + ALARM_VIDEO_GAP_MS. The
+  # +0.3 on the jingle is ffplay's spawn slack.
+  local alarm_epoch=0
+  alarm_epoch=$(date -d "today $(cat "$ALARM_TIME_FILE" 2>/dev/null || true)" +%s 2>/dev/null || echo 0)
+  if [ "$alarm_epoch" -le 0 ]; then
+    # No usable time file (should not happen while a timer is armed): degrade
+    # to anchoring on roughly now, like the pre-2026-10-09 behaviour.
+    alarm_epoch=$(( $(date +%s) + ${jingle_s%.*} - 1 ))
+  fi
+  ALARM_EPOCH_MS=$(awk -v t="$alarm_epoch" 'BEGIN { printf "%d", t * 1000 }')
+  # Safety activation click: lands just before the voice attempt so a slow
+  # page load can never leave the TTS element without user activation. It is
+  # harmless when click 1 already landed - the paused media is
+  # pointer-disabled until playback starts, so this click lands on nothing.
+  CLICK_SAFETY_EPOCH=$(awk -v t="$alarm_epoch" -v j="$jingle_s" 'BEGIN { printf "%d", t + int(j) - 1 }')
+  # Click 2 (embed only): just after the embed becomes visible and playable
+  # (voice end + ALARM_VIDEO_GAP_MS + a beat).
+  CLICK2_EPOCH=$(awk -v t="$alarm_epoch" -v j="$jingle_s" -v v="$tts0_s" -v g1="$ALARM_VOICE_GAP_MS" -v g2="$ALARM_VIDEO_GAP_MS" 'BEGIN { printf "%d", t + int(j + 0.3 + g1/1000 + v + g2/1000 + 1.0) }')
+  echo "page timing: jingle ${jingle_s}s, first voice ${tts0_s}s; voice at set+$(awk -v j="$jingle_s" -v g="$ALARM_VOICE_GAP_MS" 'BEGIN{printf "%.1f", j + 0.3 + g/1000}')s, safety click at set+$(awk -v j="$jingle_s" 'BEGIN{printf "%d", int(j) - 1}')s, click2 at set+$(awk -v c="$CLICK2_EPOCH" -v t="$alarm_epoch" 'BEGIN{printf "%d", c - t}')s" >&2
 
   media_url=$(json_field "$media_json" url)
   embed_id=$(json_field "$media_json" embed_id)
@@ -1316,10 +1360,14 @@ const audioFallbackUrl = $audio_fallback_url_js;
 const mediaStartFallbackMs = ${ALARM_MEDIA_FALLBACK_MS};
 const hasMedia = Boolean(embedId || mediaUrl);
 const weatherUrl = $weather_url_js;
-// The script starts the alarm sound and opens this page in the same breath;
-// this is the sound's remaining life once the page has loaded, after which the
-// good morning voice speaks and only then does media start.
-const jingleDelayMs = $jingle_delay_ms;
+// The good morning voice is anchored to the WALL CLOCK - the set time plus
+// the jingle's length and a beat - so page-load lag can never delay it; the
+// worst case clamps to "fire now". The +0.3 covers ffplay's spawn slack.
+const alarmEpochMs = $ALARM_EPOCH_MS;
+const jingleSeconds = ${jingle_s};
+const gapAfterJingleMs = ${ALARM_VOICE_GAP_MS};
+const gapAfterVoiceMs = ${ALARM_VIDEO_GAP_MS};
+const voiceAtMs = alarmEpochMs + (jingleSeconds + 0.3) * 1000 + gapAfterJingleMs;
 const embedLoadGraceMs = ${EMBED_LOAD_GRACE_MS};
 const WEATHER_REFRESH_MS = 60 * 60 * 1000;
 const WEATHER_RETRY_MS = 5 * 60 * 1000;
@@ -1509,6 +1557,7 @@ function showMediaNote(text) {
 }
 
 function startAudioMode(url, isRecovery) {
+  audioContainer.style.pointerEvents = 'auto';
   audioContainer.style.display = 'block';
   if (thumbnail) {
     audioContainer.style.backgroundImage = 'url(' + thumbnail + ')';
@@ -1548,6 +1597,9 @@ function startMedia() {
     // (dead or very slow link) has this long to prove itself before the page
     // drops to the audio-only enclosure, which needs a ninth of the data.
     mediaFallbackTimer = setTimeout(fallbackToAudio, mediaStartFallbackMs);
+  }
+  if (!isAudio) {
+    video.style.pointerEvents = 'auto';
   }
   tryPlay();
   startIntervals(true);
@@ -1770,12 +1822,14 @@ function tickIntervals() {
 
 // Preload the media now so it is ready the moment the wakeup sequence ends.
 // Nothing plays here: the elements stay paused until the jingle and the good
-// morning voice have finished - playback is sequenced from jingleDelayMs.
+// morning voice have finished. They are also pointer-disabled while paused, so
+// the safety activation click can never toggle playback by accident.
 let preloadPlayer = null;
 if (embedId) {
   insertEmbedFrame();
 } else if (hasMedia) {
   if (isAudio) {
+    audioContainer.style.pointerEvents = 'none';
     audioContainer.style.display = 'block';
     if (thumbnail) {
       audioContainer.style.backgroundImage = 'url(' + thumbnail + ')';
@@ -1834,13 +1888,14 @@ video.addEventListener('playing', () => {
   stopMediaFallback();
 });
 
-// Wakeup sequence: when the alarm sound has finished, the good morning voice
-// speaks (it gets parked for the activation click if that has not landed yet),
-// and media starts when the voice resolves - ended, failed, or timed out.
+// Wakeup sequence: the good morning voice is wall-clock anchored (see
+// voiceAtMs) - it fires at set_time + jingle + gap, whatever the page-load
+// lag was. When the voice resolves - ended, failed, or timed out - media
+// starts after one more beat.
 function beginWakeupSequence() {
-  playTts(0).then(startMedia, startMedia);
+  playTts(0).then(() => setTimeout(startMedia, gapAfterVoiceMs), () => setTimeout(startMedia, gapAfterVoiceMs));
 }
-setTimeout(beginWakeupSequence, jingleDelayMs);
+setTimeout(beginWakeupSequence, Math.max(0, voiceAtMs - Date.now()));
 </script>
 </body>
 </html>
@@ -1864,15 +1919,19 @@ open_player_page() {
   fi
 }
 
-# Click 1 always fires, media or not: landing on the page overlay is what gives
-# the document the user activation the TTS element needs (Brave will not unlock
-# audio for a page nobody has interacted with). It must not start playback -
-# the page sequences that itself. Click 2 is embed-only and timed to land just
-# after the good morning voice ends, on the embed's big play button -
-# Invidious' player style puts it at the top-left, (55,34) at 1080p, verified
-# via CDP - starting playback with a real in-frame gesture, because the embed
-# is deliberately loaded WITHOUT autoplay (Brave ignores allow="autoplay"
-# delegation from a file:// parent). Direct streams are started by the page.
+# Click 1 always fires, as soon as the page should be up: landing on the page
+# overlay gives the document the user activation the TTS element needs (Brave
+# will not unlock audio for a page nobody has interacted with). It must not
+# start playback - the page sequences that itself. The SAFETY click is wall-
+# clock anchored to just before the good morning voice: if click 1 fired into a
+# still-loading page (which once left the voice stranded), this one grants the
+# activation; with the paused media pointer-disabled until playback it is
+# harmless when activation already exists. Click 3 is embed-only and wall-
+# clock anchored to land just after the embed becomes visible, on its big play
+# button - Invidious' player style puts it at the top-left, (55,34) at 1080p,
+# verified via CDP - because the embed is deliberately loaded WITHOUT autoplay
+# (Brave ignores allow="autoplay" delegation from a file:// parent). Direct
+# streams are started by the page's own sequencing.
 start_scripted_clicks() {
   if [ ! -x "$YDOTOOL_BIN" ]; then
     echo "ydotool missing at ${YDOTOOL_BIN}; nothing will click to start playback/unlock TTS" >&2
@@ -1881,15 +1940,24 @@ start_scripted_clicks() {
 
   (
     export YDOTOOL_SOCKET="$YDOTOOL_SOCKET_PATH"
+
+    # Wall-clock anchored click: waiting for an absolute epoch survives slow
+    # page loads and a late systemd trigger alike.
+    click_at() {
+      local target="$1" x="$2" y="$3" d
+      d=$((target - $(date +%s)))
+      [ "$d" -lt 0 ] && d=0
+      sleep "$d"
+      "$YDOTOOL_BIN" mousemove --absolute "$x" "$y"
+      "$YDOTOOL_BIN" click 0xC0
+    }
+
     sleep "$ALARM_CLICK1_DELAY_SECONDS"
     "$YDOTOOL_BIN" mousemove --absolute 517 312
     "$YDOTOOL_BIN" click 0xC0
+    click_at "$CLICK_SAFETY_EPOCH" 517 312
     if [ "$EMBED_MODE" -eq 1 ]; then
-      local remain=$((CLICK2_DELAY_SECONDS - ALARM_CLICK1_DELAY_SECONDS))
-      [ "$remain" -lt 1 ] && remain=1
-      sleep "$remain"
-      "$YDOTOOL_BIN" mousemove --absolute 55 34
-      "$YDOTOOL_BIN" click 0xC0
+      click_at "$CLICK2_EPOCH" 55 34
     fi
   ) &
 }
