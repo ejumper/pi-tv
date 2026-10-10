@@ -147,6 +147,20 @@ static void uinput_setup(int fd, enum ydotool_uinput_setup_options setup_opt) {
 
 			}
 		}
+
+		/* ABS axis ranges. Without UI_ABS_SETUP the axis min=max=0 and every
+		 * mousemove --absolute clamps to (0,0). Range = TV panel, 0-based max. */
+		static const struct uinput_abs_setup abs_ranges[] = {
+			{ .code = ABS_X, .absinfo = { .maximum = 3839 } },
+			{ .code = ABS_Y, .absinfo = { .maximum = 2159 } },
+			{ .code = ABS_MT_POSITION_X, .absinfo = { .maximum = 3839 } },
+			{ .code = ABS_MT_POSITION_Y, .absinfo = { .maximum = 2159 } },
+		};
+		for (int i = 0; i < sizeof(abs_ranges) / sizeof(abs_ranges[0]); i++) {
+			if (ioctl(fd, UI_ABS_SETUP, &abs_ranges[i])) {
+				fprintf(stderr, "UI_ABS_SETUP %d failed\n", abs_ranges[i].code);
+			}
+		}
 	}
 
 	static const struct uinput_setup usetup = {
